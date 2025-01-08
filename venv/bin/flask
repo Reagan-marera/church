@@ -1,4 +1,4 @@
-#!/home/reagan/Documents/financial-reporting-system/backend/venv/bin/python
+#!/home/reagan/church/finance/venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

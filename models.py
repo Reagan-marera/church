@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import UniqueConstraint
+from datetime import datetime
 
 # Initialize the database
 db = SQLAlchemy()
@@ -20,23 +21,49 @@ class Church(db.Model):
         return f'<Church {self.name}>'
     
     
-    
+
 class TithePledge(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    amount_pledged = db.Column(db.Float, nullable=False)
+    amount_pledged = db.Column(db.Float, nullable=False)  # Monthly pledge amount
     month = db.Column(db.String(20), nullable=False)  # 'January', 'February', etc.
     year = db.Column(db.Integer, nullable=False)  # The year of the pledge
     member_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     church_id = db.Column(db.Integer, db.ForeignKey('church.id'), nullable=False)
-
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)  # Add this line for timestamp
     # Relationships
     member = db.relationship('User', back_populates='tithe_pledges')
     church = db.relationship('Church', back_populates='tithe_pledges')
+    payments = db.relationship('Payment', back_populates='pledge', lazy=True)
+
+    # Fields to track the pledge totals
+    total_amount = db.Column(db.Float, nullable=False)  # Total pledged amount (amount_pledged * 12)
+    remaining_amount = db.Column(db.Float, nullable=False)  # Amount remaining to be paid
 
     def __repr__(self):
         return f'<TithePledge {self.member.username} for {self.month}-{self.year} pledging {self.amount_pledged}>'
 
-# OTP Model
+    def update_remaining_amount(self):
+        # Update the remaining amount by calculating payments made
+        total_paid = sum(payment.amount for payment in self.payments)
+        self.remaining_amount = self.total_amount - total_paid
+
+    def apply_payment(self, amount):
+        # Apply a payment to the pledge, reducing the remaining amount
+        self.remaining_amount -= amount
+        db.session.commit()
+        
+class Payment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    amount = db.Column(db.Float, nullable=False)
+    date = db.Column(db.DateTime, default=datetime.utcnow)
+    pledge_id = db.Column(db.Integer, db.ForeignKey('tithe_pledge.id'), nullable=True)
+
+    pledge = db.relationship('TithePledge', back_populates='payments')
+
+    def __repr__(self):
+        return f'<Payment {self.amount} for Pledge ID {self.pledge_id}>'
+
+
 # User Model with role-based access
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -95,13 +122,13 @@ class InvoiceIssued(db.Model):
     date_issued = db.Column(db.Date, nullable=False)
     account_class = db.Column(db.String(100), nullable=False)
     account_type = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
     parent_account = db.Column(db.String(150), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
-    coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=False)
+    coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
     chart_of_account = db.relationship('ChartOfAccounts', backref=db.backref('invoices', lazy=True))
     user = db.relationship('User', back_populates='invoices')
-
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
     grn_number = db.Column(db.String(20), nullable=True)
