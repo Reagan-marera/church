@@ -100,7 +100,6 @@ class User(db.Model):
     def __repr__(self):
         return f'<User {self.username} - {self.role}>'
 
-# Chart of Accounts (COA) model
 class ChartOfAccounts(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     parent_account = db.Column(db.String(150), nullable=False)
@@ -156,7 +155,7 @@ class CashReceiptJournal(db.Model):
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
     bank = db.Column(db.String(100), nullable=True)  # Nullable for bank field
-    cash = db.Column(db.Float, nullable=False)
+    cash = db.Column(db.Float, nullable=True)
     total = db.Column(db.Float, nullable=False)
     parent_account = db.Column(db.String(150), nullable=False)
     cashbook = db.Column(db.String(250), nullable=False) 

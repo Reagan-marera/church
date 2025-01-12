@@ -14,6 +14,9 @@ from datetime import date
 import requests
 import json
 from sqlalchemy.orm import joinedload
+from sqlalchemy import func
+
+
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///financial_reporting.db'  
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -449,8 +452,6 @@ def get_all_transactions():
     }
 
     return jsonify(transactions)
-
-# Route to manage the chart of accounts (GET and POST)
 @app.route('/chart-of-accounts', methods=['GET', 'POST'])
 @jwt_required()
 def manage_chart_of_accounts():
@@ -498,7 +499,6 @@ def manage_chart_of_accounts():
         except :
             db.session.rollback()  # Rollback on failure
             return jsonify({'error': 'Failed to create account, possible data integrity issue'}), 400
-# Route to update or delete chart of accounts (PUT and DELETE)
 @app.route('/chart-of-accounts/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_delete_chart_of_accounts(id):
@@ -669,11 +669,11 @@ def manage_cash_receipt_journals():
             data = request.get_json()
             app.logger.info(f"Received data: {data}")
 
-            # Validate required fields
+            # Validate required fields (excluding cash and bank)
             required_fields = [
                 'receipt_date', 'receipt_no', 'from_whom_received',
                 'account_class', 'account_type', 'receipt_type',
-                'cash', 'bank', 'parent_account', 'cashbook'
+                'parent_account', 'cashbook'
             ]
             missing_fields = [field for field in required_fields if not data.get(field)]
             if missing_fields:
@@ -689,10 +689,14 @@ def manage_cash_receipt_journals():
             if CashReceiptJournal.query.filter_by(created_by=current_user_id, receipt_no=data['receipt_no']).first():
                 return jsonify({'error': f'Receipt number {data["receipt_no"]} already exists for your account.'}), 400
 
-            # Validate numeric fields
+            # No validation for cash and bank being required or numeric, so we allow them to be None or 0
+            cash = data.get('cash', 0)  # Default to 0 if not provided
+            bank = data.get('bank', 0)  # Default to 0 if not provided
+
+            # Ensure that if they are provided, they are numeric
             try:
-                cash = float(data['cash'])
-                bank = float(data['bank'])
+                cash = float(cash)
+                bank = float(bank)
             except ValueError:
                 return jsonify({'error': 'Cash and Bank must be numeric values.'}), 400
 
@@ -733,8 +737,8 @@ def manage_cash_receipt_journals():
             db.session.add(new_journal)
             db.session.commit()
 
-            return jsonify({'message': 'Journal entry created successfully'}), 201
-
+            return jsonify({'message': 'Journal entry created successfully'}), 20
+   
         elif request.method == 'GET':
             # Fetch all journals created by the current user
             journals = CashReceiptJournal.query.filter_by(created_by=current_user_id).all()
@@ -933,15 +937,13 @@ def update_delete_cash_disbursement_journals(id):
     if request.method == 'PUT':
         data = request.get_json()
 
-        # Validate accounts
+        # REMOVE: Validate accounts
+        # account_credited = data.get('account_credited', journal.account_credited)
+        # account_debited = data.get('account_debited', journal.account_debited)
+
+        # Skip the validation for the accounts, just get the new values or keep old ones
         account_credited = data.get('account_credited', journal.account_credited)
         account_debited = data.get('account_debited', journal.account_debited)
-
-        coa_entry_credited = ChartOfAccounts.query.filter_by(user_id=user_id, account_name=account_credited).first()
-        coa_entry_debited = ChartOfAccounts.query.filter_by(user_id=user_id, account_name=account_debited).first()
-
-        if not coa_entry_credited or not coa_entry_debited:
-            return jsonify({"error": "Invalid account credited or debited."}), 400
 
         # Validate sub_accounts (Optional)
         sub_accounts = data.get('sub_accounts', journal.sub_accounts)
@@ -973,6 +975,7 @@ def update_delete_cash_disbursement_journals(id):
         db.session.delete(journal)
         db.session.commit()
         return jsonify({"message": "Cash Disbursement Journal entry deleted successfully"})
+
 @app.route('/usertransactions', methods=['GET'])
 @jwt_required()
 def get_user_transactions():
@@ -1399,6 +1402,153 @@ def sendstk(amount, phone):
         print(data)
     else:
         print("Request failed with status code:", response.status_code)
+        
+# Mock function for db.session.query
+
+def get_opening_balance(account_id):
+    # Example of fetching opening balance using account_id
+    opening_balance_query = db.session.query(func.sum(CashReceiptJournal.total).label('total_receipts')) \
+        .filter(CashReceiptJournal.account_credited == account_id) \
+        .filter(func.extract('month', CashReceiptJournal.receipt_date) < datetime.now().month) \
+        .filter(func.extract('year', CashReceiptJournal.receipt_date) == datetime.now().year) \
+        .scalar()
+
+    opening_balance_receipts = opening_balance_query if opening_balance_query else 0.0
+
+    # Log the data received from the CashReceiptJournal query
+    logging.debug(f"Opening Balance Receipts for account {account_id}: {opening_balance_receipts}")
+
+    opening_balance_query = db.session.query(func.sum(CashDisbursementJournal.total).label('total_disbursements')) \
+        .filter(CashDisbursementJournal.account_debited == account_id) \
+        .filter(func.extract('month', CashDisbursementJournal.disbursement_date) < datetime.now().month) \
+        .filter(func.extract('year', CashDisbursementJournal.disbursement_date) == datetime.now().year) \
+        .scalar()
+
+    opening_balance_disbursements = opening_balance_query if opening_balance_query else 0.0
+
+    # Log the data received from the CashDisbursementJournal query
+    logging.debug(f"Opening Balance Disbursements for account {account_id}: {opening_balance_disbursements}")
+
+    # Subtract disbursements from receipts for opening balance
+    opening_balance = opening_balance_receipts - opening_balance_disbursements
+
+    # Log the calculated opening balance
+    logging.debug(f"Calculated Opening Balance for account {account_id}: {opening_balance}")
+
+    return opening_balance
+
+@app.route('/financial-report', methods=['GET'])
+def financial_report():
+    current_month = datetime.now().month
+    current_year = datetime.now().year
+
+    # Fetch parent accounts (those with parent_account not None or 0)
+    parent_accounts = ChartOfAccounts.query.filter(
+        ChartOfAccounts.parent_account.isnot(None),
+        ChartOfAccounts.parent_account != 0
+    ).all()
+
+    logging.debug(f"Parent accounts fetched: {parent_accounts}")
+
+    if not parent_accounts:
+        logging.warning("No parent accounts found in the database!")
+
+    report = []
+
+    for parent_account in parent_accounts:
+        logging.debug(f"Looking for sub-accounts for parent account ID: {parent_account.id}")
+        
+        # Check if sub_account_details is populated
+        if parent_account.sub_account_details:
+            logging.debug(f"Sub-account details for parent account '{parent_account.parent_account}': {parent_account.sub_account_details}")
+        else:
+            logging.debug(f"No sub-account details found for parent account '{parent_account.parent_account}'")
+
+        account_data = {
+            'parent_account': parent_account.parent_account,
+            'sub_account_details': parent_account.sub_account_details or [],  # Use sub_account_details directly
+            'opening_balance': 0.0,
+            'transactions': {
+                'receipts': 0.0,
+                'disbursements': 0.0,
+            },
+            'closing_balance': 0.0
+        }
+
+        # If sub_account_details is not empty, iterate over them (assuming it's a list)
+        for sub_account in account_data['sub_account_details']:
+            logging.debug(f"Processing sub-account: {sub_account}")
+
+            # Ensure sub_account has 'transactions' key initialized
+            if 'transactions' not in sub_account:
+                sub_account['transactions'] = {
+                    'receipts': 0.0,
+                    'disbursements': 0.0
+                }
+
+            logging.debug(f"Sub-account structure: {sub_account}")  # Log the entire structure of sub_account
+            
+            # Check if 'id' exists in the sub_account dictionary
+            if 'id' not in sub_account:
+                logging.error(f"Sub-account does not have an 'id': {sub_account}")
+                continue  # Skip this sub-account if it doesn't have 'id'
+            
+            # Now safely access the 'id' of the sub_account
+            sub_account_data = {
+                'sub_account_name': sub_account['sub_account_name'] if 'sub_account_name' in sub_account else 'Unknown',
+                'opening_balance': get_opening_balance(sub_account['id']),  # Access using dictionary keys
+                'transactions': sub_account['transactions'],  # Ensure 'transactions' is properly initialized
+                'closing_balance': 0.0
+            }
+
+            # Fetch receipts for the current sub-account
+            receipts = CashReceiptJournal.query.filter(
+                CashReceiptJournal.account_credited == sub_account['id'],  # Use sub_account['id']
+                func.extract('month', CashReceiptJournal.receipt_date) == current_month,
+                func.extract('year', CashReceiptJournal.receipt_date) == current_year
+            ).all()
+
+            # Fetch disbursements for the current sub-account
+            disbursements = CashDisbursementJournal.query.filter(
+                CashDisbursementJournal.account_debited == sub_account['id'],  # Use sub_account['id']
+                func.extract('month', CashDisbursementJournal.disbursement_date) == current_month,
+                func.extract('year', CashDisbursementJournal.disbursement_date) == current_year
+            ).all()
+
+            logging.debug(f"Receipts for subaccount {sub_account['sub_account_name']}: {receipts}")
+            logging.debug(f"Disbursements for subaccount {sub_account['sub_account_name']}: {disbursements}")
+
+            # Calculate total receipts and disbursements for the sub-account
+            sub_account_data['transactions']['receipts'] = sum(receipt.total for receipt in receipts) if receipts else 0.0
+            sub_account_data['transactions']['disbursements'] = sum(disbursement.total for disbursement in disbursements) if disbursements else 0.0
+
+            # Calculate closing balance for the sub-account
+            sub_account_data['closing_balance'] = sub_account_data['opening_balance'] + \
+                                                    sub_account_data['transactions']['receipts'] - \
+                                                    sub_account_data['transactions']['disbursements']
+
+            # Add sub-account data to the parent account data
+            account_data['transactions']['receipts'] += sub_account_data['transactions']['receipts']
+            account_data['transactions']['disbursements'] += sub_account_data['transactions']['disbursements']
+            account_data['sub_account_details'].append(sub_account_data)
+
+        # Calculate total opening balance, receipts, disbursements, and closing balance for the parent account
+        account_data['opening_balance'] = sum(float(sub['opening_balance'] or 0.0) for sub in account_data['sub_account_details'])
+        account_data['transactions']['receipts'] = sum(sub['transactions']['receipts'] for sub in account_data['sub_account_details'])
+        account_data['transactions']['disbursements'] = sum(sub['transactions']['disbursements'] for sub in account_data['sub_account_details'])
+        account_data['closing_balance'] = account_data['opening_balance'] + \
+                                          account_data['transactions']['receipts'] - \
+                                          account_data['transactions']['disbursements']
+
+        logging.debug(f"Parent account data: {account_data}")
+
+        # Add the parent account data to the report
+        report.append(account_data)
+
+    return jsonify(report)
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
