@@ -14,7 +14,7 @@ from datetime import date
 import requests
 import json
 from sqlalchemy.orm import joinedload
-from sqlalchemy import func
+from sqlalchemy import func,or_
 
 
 app = Flask(__name__)
@@ -452,9 +452,12 @@ def get_all_transactions():
     }
 
     return jsonify(transactions)
+
+
 @app.route('/chart-of-accounts', methods=['GET', 'POST'])
 @jwt_required()
 def manage_chart_of_accounts():
+    
     # Get the current user_id from the JWT (Make sure you're extracting just the id)
     current_user_data = get_jwt_identity()  # This should return the JWT payload (likely a dictionary)
     current_user_id = current_user_data.get('id')  # Extract the 'id' specifically
@@ -483,6 +486,19 @@ def manage_chart_of_accounts():
         if sub_account_details and not isinstance(sub_account_details, (dict, list)):
             return jsonify({'error': 'sub_account_details should be a JSON object or list'}), 400
 
+        # If sub_account_details is provided, ensure each subaccount has a unique ID
+        if sub_account_details:
+            next_id = 1  # Start with ID = 1 for the first subaccount
+            
+            for sub_account in sub_account_details:
+                if 'id' not in sub_account or not sub_account['id']:
+                    sub_account['id'] = f"subaccount-{next_id}"  # Assign the next available ID
+                    next_id += 1  # Increment ID for next subaccount
+                else:
+                    # If the ID is already present, ensure it is unique by checking it
+                    if sub_account['id'] == next_id:
+                        next_id += 1  # Avoid duplicate ID if there was an error in the data
+
         # Create a new account for the current user
         new_account = ChartOfAccounts(
             parent_account=data['parent_account'],
@@ -496,9 +512,43 @@ def manage_chart_of_accounts():
             db.session.add(new_account)
             db.session.commit()
             return jsonify({'message': 'Chart of Accounts created successfully'}), 201
-        except :
+        except Exception as e:
             db.session.rollback()  # Rollback on failure
-            return jsonify({'error': 'Failed to create account, possible data integrity issue'}), 400
+            return jsonify({'error': f'Failed to create account, error: {str(e)}'}), 400
+@app.route('/update-subaccount-ids', methods=['POST'])
+@jwt_required()
+def update_subaccount_ids():
+    # Get the current user_id from the JWT (Make sure you're extracting just the id)
+    current_user_data = get_jwt_identity()  # This should return the JWT payload (likely a dictionary)
+    current_user_id = current_user_data.get('id')  # Extract the 'id' specifically
+
+    try:
+        # Retrieve all accounts for the current user
+        accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+
+        # Variable to track the next available ID
+        next_id = 1
+
+        # Loop through each account and update its subaccounts if needed
+        for account in accounts:
+            # Loop through each subaccount for the current account
+            for sub_account in account.sub_account_details:
+                # Check if the subaccount has an 'id', if not, generate one
+                if 'id' not in sub_account or not sub_account['id']:
+                    sub_account['id'] = f"subaccount-{next_id}"
+                    next_id += 1  # Increment ID for the next subaccount
+
+            # Commit changes to the account (this will also save updated subaccounts)
+            db.session.commit()
+
+        return jsonify({'message': 'Subaccount IDs updated successfully'}), 200
+
+    except Exception as e:
+        # Handle any errors and perform a rollback if necessary
+        db.session.rollback()
+        return jsonify({'error': f'Failed to update subaccount IDs, error: {str(e)}'}), 500
+
+        
 @app.route('/chart-of-accounts/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_delete_chart_of_accounts(id):
@@ -1404,7 +1454,6 @@ def sendstk(amount, phone):
         print("Request failed with status code:", response.status_code)
         
 # Mock function for db.session.query
-
 def get_opening_balance(account_id):
     # Example of fetching opening balance using account_id
     opening_balance_query = db.session.query(func.sum(CashReceiptJournal.total).label('total_receipts')) \
@@ -1436,6 +1485,8 @@ def get_opening_balance(account_id):
     logging.debug(f"Calculated Opening Balance for account {account_id}: {opening_balance}")
 
     return opening_balance
+
+# Your existing code...
 
 @app.route('/financial-report', methods=['GET'])
 def financial_report():
@@ -1495,8 +1546,8 @@ def financial_report():
             
             # Now safely access the 'id' of the sub_account
             sub_account_data = {
-                'sub_account_name': sub_account['sub_account_name'] if 'sub_account_name' in sub_account else 'Unknown',
-                'opening_balance': get_opening_balance(sub_account['id']),  # Access using dictionary keys
+                'sub_account_name': sub_account['name'] if 'name' in sub_account else 'Unknown',  # Using 'name' instead of 'sub_account_name'
+                'opening_balance': get_opening_balance(sub_account['id']),  # Access using 'id' instead of 'name'
                 'transactions': sub_account['transactions'],  # Ensure 'transactions' is properly initialized
                 'closing_balance': 0.0
             }
@@ -1508,6 +1559,9 @@ def financial_report():
                 func.extract('year', CashReceiptJournal.receipt_date) == current_year
             ).all()
 
+            # Log the receipts data
+            logging.debug(f"Receipts for subaccount {sub_account['name']}: {receipts}")  # Change sub_account_name to 'name'
+
             # Fetch disbursements for the current sub-account
             disbursements = CashDisbursementJournal.query.filter(
                 CashDisbursementJournal.account_debited == sub_account['id'],  # Use sub_account['id']
@@ -1515,12 +1569,16 @@ def financial_report():
                 func.extract('year', CashDisbursementJournal.disbursement_date) == current_year
             ).all()
 
-            logging.debug(f"Receipts for subaccount {sub_account['sub_account_name']}: {receipts}")
-            logging.debug(f"Disbursements for subaccount {sub_account['sub_account_name']}: {disbursements}")
+            # Log the disbursements data
+            logging.debug(f"Disbursements for subaccount {sub_account['name']}: {disbursements}")  # Change sub_account_name to 'name'
 
             # Calculate total receipts and disbursements for the sub-account
             sub_account_data['transactions']['receipts'] = sum(receipt.total for receipt in receipts) if receipts else 0.0
             sub_account_data['transactions']['disbursements'] = sum(disbursement.total for disbursement in disbursements) if disbursements else 0.0
+
+            # Log the aggregated receipt and disbursement values for the sub-account
+            logging.debug(f"Aggregated Receipts for subaccount {sub_account['name']}: {sub_account_data['transactions']['receipts']}")
+            logging.debug(f"Aggregated Disbursements for subaccount {sub_account['name']}: {sub_account_data['transactions']['disbursements']}")
 
             # Calculate closing balance for the sub-account
             sub_account_data['closing_balance'] = sub_account_data['opening_balance'] + \
@@ -1546,6 +1604,931 @@ def financial_report():
         report.append(account_data)
 
     return jsonify(report)
+
+
+
+def normalize_sub_account_name(name):
+    """Normalize the sub_account name by trimming spaces and converting to lowercase."""
+    if isinstance(name, str):
+        return name.strip().lower()
+    return name
+
+def match_sub_account_name(sub_account_name_normalized, sub_accounts):
+    """Helper function to match sub_account_name against sub_accounts."""
+    if isinstance(sub_accounts, dict):
+        # Handle the case where sub_accounts is a dictionary, where keys are sub-account names
+        for account_key in sub_accounts.keys():
+            account_name = normalize_sub_account_name(account_key)  # Normalize sub-account name
+            print(f"Checking sub_account_name (dict): {account_name} against {sub_account_name_normalized}")
+            if account_name == sub_account_name_normalized:
+                return True
+    elif isinstance(sub_accounts, list):
+        # Handle the case where sub_accounts is a list of names
+        for account in sub_accounts:
+            account_name = normalize_sub_account_name(account)  # Normalize sub-account name
+            print(f"Checking sub_account_name (list): {account_name} against {sub_account_name_normalized}")
+            if account_name == sub_account_name_normalized:
+                return True
+    elif isinstance(sub_accounts, str):
+        # Handle the case where sub_accounts is a string (likely JSON format)
+        try:
+            sub_accounts_json = json.loads(sub_accounts)
+            print(f"Checking sub_account_name (json): {sub_accounts_json}")
+            return match_sub_account_name(sub_account_name_normalized, sub_accounts_json)
+        except json.JSONDecodeError:
+            print(f"Failed to decode JSON string in sub_accounts: {sub_accounts}")
+    return False
+
+def filter_invoice_by_sub_account(invoices, sub_account_name_normalized):
+    """Custom function to filter invoices based on sub_account_name."""
+    filtered_invoices = []
+    
+    for invoice in invoices:
+        try:
+            sub_accounts = invoice.sub_accounts
+            print(f"Raw sub_accounts for invoice {invoice.id}: {sub_accounts}")
+
+            # Check if sub_accounts is empty or None
+            if not sub_accounts:
+                print(f"Skipping invoice {invoice.id} as sub_accounts is empty or None")
+                continue
+
+            if isinstance(sub_accounts, str):
+                # Handle string format (JSON string)
+                sub_accounts = json.loads(sub_accounts) if sub_accounts else {}
+                print(f"Decoded sub_accounts (JSON): {sub_accounts}")
+
+            # For invoices, we expect a different structure (nested dict)
+            if match_sub_account_name(sub_account_name_normalized, sub_accounts):
+                filtered_invoices.append(invoice)
+        except json.JSONDecodeError as e:
+            print(f"Failed to decode sub_accounts for invoice {invoice.id}: {str(e)}")
+        except Exception as e:
+            print(f"Error processing sub_accounts for invoice {invoice.id}: {str(e)}")
+
+    return filtered_invoices
+
+def filter_entries_by_sub_account(entries, sub_account_name_normalized):
+    """
+    Filters a list of entries (receipts, disbursements) based on the sub_account_name.
+    """
+    filtered_entries = []
+
+    for entry in entries:
+        try:
+            sub_accounts = entry.sub_accounts
+            print(f"Raw sub_accounts for entry {entry.id}: {sub_accounts}")
+            
+            # Check if sub_accounts is empty or None
+            if not sub_accounts:
+                print(f"Skipping entry {entry.id} as sub_accounts is empty or None")
+                continue
+            
+            if isinstance(sub_accounts, str):
+                # Handle string format (JSON string)
+                sub_accounts = json.loads(sub_accounts) if sub_accounts else {}
+                print(f"Decoded sub_accounts (JSON): {sub_accounts}")
+
+            # Filter based on sub_account_name
+            if match_sub_account_name(sub_account_name_normalized, sub_accounts):
+                filtered_entries.append(entry)
+        except json.JSONDecodeError as e:
+            print(f"Failed to decode sub_accounts for entry {entry.id}: {str(e)}")
+        except Exception as e:
+            print(f"Error processing sub_accounts for entry {entry.id}: {str(e)}")
+
+    return filtered_entries
+
+@app.route('/cash-and-cash-equivalents-report', methods=['GET'])
+@jwt_required()
+def cash_and_cash_equivalents_report():
+    try:
+        # Extract user info from JWT
+        current_user = get_jwt_identity()  # Returns a dictionary with user data
+        current_user_id = current_user['id']  # Extract the user ID
+
+        # Query ChartOfAccounts with the extracted user ID
+        parent_accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+
+        report_data = []
+        seen_entries = set()  # To track unique combinations of parent_account and sub_account_name
+
+        # Initialize overall totals
+        overall_receipts = 0.0
+        overall_disbursements = 0.0
+        overall_closing_balance = 0.0
+        overall_invoices = 0.0
+
+        # Loop through each parent account
+        for parent_account in parent_accounts:
+            account_name = parent_account.account_name
+            account_type = parent_account.account_type  # E.g., Asset, Liability, Equity
+            sub_account_details = parent_account.sub_account_details or []
+
+            # Loop through each sub-account
+            for sub_account in sub_account_details:
+                sub_account_name = sub_account.get("name")
+                balance_type = sub_account.get("balance_type")
+                opening_balance = sub_account.get("opening_balance", 0.0)  # Default to 0.0 if no opening balance
+
+                # Skip if this combination of parent_account and sub_account_name is already seen
+                if (parent_account.parent_account, sub_account_name) in seen_entries:
+                    continue
+                seen_entries.add((parent_account.parent_account, sub_account_name))
+
+                # Query CashReceiptJournal, CashDisbursementJournal, and InvoiceIssued based on parent_account
+                receipts = CashReceiptJournal.query.filter(
+                    CashReceiptJournal.parent_account == parent_account.parent_account
+                ).all()
+                disbursements = CashDisbursementJournal.query.filter(
+                    CashDisbursementJournal.parent_account == parent_account.parent_account
+                ).all()
+                invoices = InvoiceIssued.query.filter(
+                    InvoiceIssued.parent_account == parent_account.parent_account
+                ).all()
+
+                # Debug: Check the query results
+                print(f"Found {len(receipts)} receipts: {receipts}")
+                print(f"Found {len(disbursements)} disbursements: {disbursements}")
+                print(f"Found {len(invoices)} invoices: {invoices}")
+
+                # Normalize the sub_account_name for comparison
+                sub_account_name_normalized = normalize_sub_account_name(sub_account_name)
+                print(f"Checking sub_account_name_normalized: {sub_account_name_normalized}")
+
+                # Filter receipts, disbursements, and invoices using the helper function
+                filtered_receipts = filter_entries_by_sub_account(receipts, sub_account_name_normalized)
+                filtered_disbursements = filter_entries_by_sub_account(disbursements, sub_account_name_normalized)
+                filtered_invoices = filter_invoice_by_sub_account(invoices, sub_account_name_normalized)
+
+                # Debugging: print filtered receipts and disbursements
+                print(f"Filtered Receipts: {filtered_receipts}")
+                print(f"Filtered Disbursements: {filtered_disbursements}")
+                print(f"Filtered Invoices: {filtered_invoices}")
+
+                # Calculate the total receipts, disbursements, and invoices
+                total_receipts = sum(receipt.total for receipt in filtered_receipts) or 0.0  # Ensure it's a float
+                total_disbursements = sum(disbursement.total for disbursement in filtered_disbursements) or 0.0  # Ensure it's a float
+                total_invoices = sum(invoice.amount for invoice in filtered_invoices) or 0.0  # Ensure it's a float
+
+                # Ensure that all totals are cast to float before performing arithmetic
+                closing_balance = float(opening_balance) + total_receipts - total_disbursements
+
+                # Add to overall totals
+                overall_receipts += total_receipts
+                overall_disbursements += total_disbursements
+                overall_invoices += total_invoices
+                overall_closing_balance += closing_balance
+
+                # Prepare the report data for this sub-account
+                report_data.append({
+                    "parent_account": str(parent_account.parent_account),  # Ensure it's a string
+                    "account_name": account_name,  # Include the account name
+                    "account_type": account_type,  # Include the account type
+                    "sub_account_name": sub_account_name,
+                    "balance_type": balance_type,
+                    "opening_balance": str(opening_balance),  # Convert to string
+                    "receipts": str(total_receipts),  # Convert to string
+                    "disbursements": str(total_disbursements),  # Convert to string
+                    "invoices": str(total_invoices),  # Convert to string
+                    "closing_balance": str(closing_balance)  # Convert to string
+                })
+
+        # Return the report data as a JSON response with overall totals
+        return jsonify({
+            "message": "Cash and Cash Equivalent Report generated successfully",
+            "report_data": report_data,
+            "overall_totals": {
+                "total_receipts": str(overall_receipts),
+                "total_disbursements": str(overall_disbursements),
+                "total_invoices": str(overall_invoices),
+                "overall_closing_balance": str(overall_closing_balance)
+            }
+        })
+
+    except Exception as e:
+        # Handle any errors and provide feedback
+        print(f"Error generating report: {str(e)}")
+        return jsonify({"error": f"Failed to generate report: {str(e)}"}), 500
+
+
+
+# --- Helper Function ---
+def get_opening_balance(sub_account_id, start_date=None):
+    """
+    Calculates the opening balance for a sub-account within a specified date range.
+
+    Args:
+        sub_account_id (int): ID of the sub-account.
+        start_date (str, optional): Start date of the period in 'YYYY-MM-DD' format.
+
+    Returns:
+        float: The opening balance of the sub-account.
+    """
+    if not start_date:
+        return 0.0  # Assume no transactions before current month if start_date is not provided
+
+    receipts_before_start_date = CashReceiptJournal.query.filter(
+        CashReceiptJournal.account_credited == sub_account_id,
+        CashReceiptJournal.receipt_date < start_date
+    ).all()
+
+    disbursements_before_start_date = CashDisbursementJournal.query.filter(
+        CashDisbursementJournal.account_debited == sub_account_id,
+        CashDisbursementJournal.disbursement_date < start_date
+    ).all()
+
+    opening_balance = 0.0
+    for receipt in receipts_before_start_date:
+        opening_balance += receipt.total
+    for disbursement in disbursements_before_start_date:
+        opening_balance -= disbursement.total
+
+    return opening_balance
+
+def generate_cash_and_cash_equivalents_report(start_date=None, end_date=None):
+    cash_equivalents_data = {
+        'cash_opening_balance': 0.0,
+        'total_receipts': 0.0,
+        'total_disbursements': 0.0,
+        'cash_closing_balance': 0.0,
+        'sub_account_details': []  # Initialize an empty list for sub-account details
+    }
+
+    # 1. Calculate opening balance for cash sub-account (assuming sub_account_id for cash is 1030)
+    cash_equivalents_data['cash_opening_balance'] = get_opening_balance(sub_account_id=1030, start_date=start_date)
+
+    # 2. Calculate total receipts during the period
+    receipts_query = CashReceiptJournal.query
+    if start_date:
+        receipts_query = receipts_query.filter(CashReceiptJournal.receipt_date >= start_date)
+    if end_date:
+        receipts_query = receipts_query.filter(CashReceiptJournal.receipt_date <= end_date)
+    receipts = receipts_query.all()
+    cash_equivalents_data['total_receipts'] = sum(receipt.total for receipt in receipts)
+
+    # 3. Calculate total disbursements during the period
+    disbursements_query = CashDisbursementJournal.query
+    if start_date:
+        disbursements_query = disbursements_query.filter(CashDisbursementJournal.disbursement_date >= start_date)
+    if end_date:
+        disbursements_query = disbursements_query.filter(CashDisbursementJournal.disbursement_date <= end_date)
+    disbursements = disbursements_query.all()
+    cash_equivalents_data['total_disbursements'] = sum(disbursement.total for disbursement in disbursements)
+
+    # 4. Calculate closing balance
+    cash_equivalents_data['cash_closing_balance'] = cash_equivalents_data['cash_opening_balance'] + \
+                                                     cash_equivalents_data['total_receipts'] - \
+                                                     cash_equivalents_data['total_disbursements']
+
+    # 5. Fetch sub-account details
+    sub_accounts_query = CashReceiptJournal.query.filter(
+        CashReceiptJournal.sub_accounts.isnot(None)
+    ).all()
+
+    for receipt in sub_accounts_query:
+        for sub_account in receipt.sub_accounts:
+            sub_account_name = sub_account  # Assuming it's a string (sub-account name or ID)
+
+            # Check if the sub-account is already in the list
+            existing_sub_account = next((item for item in cash_equivalents_data['sub_account_details'] if item['sub_account_name'] == sub_account_name), None)
+            
+            if existing_sub_account:
+                # If it exists, update its balance
+                existing_sub_account['sub_account_balance'] += receipt.total
+            else:
+                # If it's a new sub-account, add it
+                cash_equivalents_data['sub_account_details'].append({
+                    'sub_account_name': sub_account_name,
+                    'sub_account_balance': receipt.total
+                })
+
+    return cash_equivalents_data
+
+
+
+def generate_income_statement(start_date=None, end_date=None):
+    """
+    Generates an income statement report with sub-account details.
+
+    Args:
+        start_date (str, optional): Start date of the report.
+        end_date (str, optional): End date of the report.
+
+    Returns:
+        dict: A dictionary representing the income statement data, including sub-account details.
+    """
+    income_statement_data = {
+        'revenue': 0.0,
+        'expenses': 0.0,
+        'net_income': 0.0,
+        'sub_account_details': []  # To hold sub-account details
+    }
+
+    # Revenue: InvoiceIssued entries
+    revenue_query = InvoiceIssued.query
+    if start_date:
+        revenue_query = revenue_query.filter(InvoiceIssued.date_issued >= start_date)
+    if end_date:
+        revenue_query = revenue_query.filter(InvoiceIssued.date_issued <= end_date)
+    invoices = revenue_query.all()
+
+    # Process revenue and sub-account details
+    for invoice in invoices:
+        income_statement_data['revenue'] += invoice.amount
+
+        # Handle sub-account details for revenue
+        if invoice.sub_accounts:
+            for sub_account in invoice.sub_accounts:
+                sub_account_name = sub_account  # Assuming sub_account is a string (sub-account name)
+                existing_sub_account = next((item for item in income_statement_data['sub_account_details'] if item['sub_account_name'] == sub_account_name), None)
+                
+                if existing_sub_account:
+                    existing_sub_account['sub_account_balance'] += invoice.amount
+                else:
+                    income_statement_data['sub_account_details'].append({
+                        'sub_account_name': sub_account_name,
+                        'sub_account_balance': invoice.amount
+                    })
+
+    # Expenses: CashDisbursementJournal entries
+    expense_query = CashDisbursementJournal.query
+    if start_date:
+        expense_query = expense_query.filter(CashDisbursementJournal.disbursement_date >= start_date)
+    if end_date:
+        expense_query = expense_query.filter(CashDisbursementJournal.disbursement_date <= end_date)
+    expenses = expense_query.all()
+
+    # Process expenses and sub-account details
+    for expense in expenses:
+        income_statement_data['expenses'] += expense.total
+
+        # Handle sub-account details for expenses
+        if expense.sub_accounts:
+            for sub_account in expense.sub_accounts:
+                sub_account_name = sub_account  # Assuming sub_account is a string (sub-account name)
+                existing_sub_account = next((item for item in income_statement_data['sub_account_details'] if item['sub_account_name'] == sub_account_name), None)
+                
+                if existing_sub_account:
+                    existing_sub_account['sub_account_balance'] -= expense.total
+                else:
+                    income_statement_data['sub_account_details'].append({
+                        'sub_account_name': sub_account_name,
+                        'sub_account_balance': -expense.total  # Negative for expenses
+                    })
+
+    # Calculate net income
+    income_statement_data['net_income'] = income_statement_data['revenue'] - income_statement_data['expenses']
+
+    return income_statement_data
+
+
+def generate_balance_sheet(as_of_date=None):
+    """
+    Generates a balance sheet report with sub-account details.
+
+    Args:
+        as_of_date (str, optional): Date for the balance sheet in 'YYYY-MM-DD' format.
+
+    Returns:
+        dict: A dictionary representing the balance sheet data, including sub-account details.
+    """
+    balance_sheet_data = {
+        'assets': {
+            'cash_and_equivalents': 0.0,
+            'accounts_receivable': 0.0,
+            'inventory': 0.0
+        },
+        'liabilities': {
+            'accounts_payable': 0.0,
+            'loans': 0.0
+        },
+        'equity': {
+            'owner_equity': 0.0,
+            'retained_earnings': 0.0
+        },
+        'sub_account_details': []  # Initialize an empty list for sub-account details
+    }
+
+    # Calculate Assets: cash_and_equivalents
+    balance_sheet_data['assets']['cash_and_equivalents'] = generate_cash_and_cash_equivalents_report(as_of_date)['cash_closing_balance']
+
+    # Calculate Liabilities: accounts_payable
+    accounts_payable_query = CashDisbursementJournal.query.filter(CashDisbursementJournal.account_debited == 'accounts_payable')
+    if as_of_date:
+        accounts_payable_query = accounts_payable_query.filter(CashDisbursementJournal.disbursement_date <= as_of_date)
+    accounts_payable = accounts_payable_query.all()
+    balance_sheet_data['liabilities']['accounts_payable'] = sum(payable.total for payable in accounts_payable)
+
+    # Process sub-account details for liabilities
+    for payable in accounts_payable:
+        if payable.sub_accounts:
+            for sub_account in payable.sub_accounts:
+                sub_account_name = sub_account  # Assuming sub_account is a string (sub-account name)
+                existing_sub_account = next((item for item in balance_sheet_data['sub_account_details'] if item['sub_account_name'] == sub_account_name), None)
+                
+                if existing_sub_account:
+                    existing_sub_account['sub_account_balance'] -= payable.total
+                else:
+                    balance_sheet_data['sub_account_details'].append({
+                        'sub_account_name': sub_account_name,
+                        'sub_account_balance': -payable.total  # Negative for liabilities
+                    })
+
+
+    return balance_sheet_data
+
+
+# --- Report Route ---
+@app.route('/reports', methods=['GET'])
+def generate_report():
+    report_type = request.args.get('type')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    as_of_date = request.args.get('as_of_date')
+
+    if report_type == 'cash_and_cash_equivalents':
+        report_data = generate_cash_and_cash_equivalents_report(start_date, end_date)
+    elif report_type == 'income_statement':
+        report_data = generate_income_statement(start_date, end_date)
+    elif report_type == 'balance_sheet':
+        report_data = generate_balance_sheet(as_of_date)
+    else:
+        return jsonify({'error': 'Invalid report type'}), 400
+
+    return jsonify(report_data)
+import json
+
+def parse_sub_accounts(sub_accounts):
+    """Parse the sub_accounts field (JSON string or list)"""
+    if isinstance(sub_accounts, str):
+        try:
+            parsed = json.loads(sub_accounts)  # Try to parse the string as JSON
+            print(f"Parsed sub_accounts: {parsed}")  # Debug print
+            return parsed
+        except json.JSONDecodeError:
+            print(f"Error parsing sub_accounts: {sub_accounts}")
+            return []  # Return empty list if parsing fails
+    elif isinstance(sub_accounts, list):
+        return sub_accounts
+    print(f"sub_accounts is already a list or not a string: {sub_accounts}")
+    return []
+
+def initialize_parent_account(report_data, parent_account, account_type):
+    """Initialize a parent account in the report_data if it doesn't already exist"""
+    if parent_account not in report_data:
+        report_data[parent_account] = {
+            'total_invoice_amount': 0,
+            'total_receipts': 0,
+            'total_disbursements': 0,
+            'sub_account_details': {},  # To hold sub-account balances
+            'account_type': account_type
+        }
+        print(f"Initialized parent account: {parent_account} with account type: {account_type}")
+
+def generate_general_report_with_sub_accounts():
+    # Initialize the report data dictionary to store account balances
+    report_data = {}
+
+    # Function to parse sub_accounts JSON field
+    def parse_sub_accounts(sub_accounts):
+        if isinstance(sub_accounts, str):
+            try:
+                return json.loads(sub_accounts)
+            except json.JSONDecodeError:
+                return []  # Return empty list if parsing fails
+        elif isinstance(sub_accounts, list):
+            return sub_accounts
+        return []
+
+    # Function to initialize a parent account in report_data if not already present
+    def initialize_parent_account(parent_account, account_type):
+        if parent_account not in report_data:
+            report_data[parent_account] = {
+                'account_type': account_type,
+                'sub_account_details': {},
+                'total_invoice_amount': 0,
+                'total_receipts': 0,
+                'total_disbursements': 0,
+            }
+
+    # Collect data from ChartOfAccounts
+    chart_of_accounts_data = db.session.query(
+        ChartOfAccounts.parent_account,
+        ChartOfAccounts.account_type,
+        ChartOfAccounts.sub_account_details
+    ).all()
+
+    # Loop through each ChartOfAccounts entry and initialize parent accounts
+    for row in chart_of_accounts_data:
+        parent_account = row.parent_account
+        account_type = row.account_type
+        sub_account_details = parse_sub_accounts(row.sub_account_details)
+
+        initialize_parent_account(parent_account, account_type)
+
+        # Initialize sub-account details with opening balances
+        for sub_account in sub_account_details:
+            sub_account_name = sub_account['name'] if isinstance(sub_account, dict) else sub_account
+            opening_balance = float(sub_account.get('opening_balance', 0)) if isinstance(sub_account, dict) else 0
+            if sub_account_name not in report_data[parent_account]['sub_account_details']:
+                report_data[parent_account]['sub_account_details'][sub_account_name] = opening_balance
+
+    # Collect data from InvoiceIssued (debit transactions)
+    invoice_data = db.session.query(
+        InvoiceIssued.parent_account,
+        InvoiceIssued.sub_accounts,
+        func.sum(InvoiceIssued.amount).label('total_invoice_amount')
+    ).group_by(InvoiceIssued.parent_account, InvoiceIssued.sub_accounts).all()
+
+    # Process invoice data (debits)
+    for row in invoice_data:
+        parent_account = row.parent_account
+        sub_accounts = parse_sub_accounts(row.sub_accounts)
+        total_invoice_amount = row.total_invoice_amount
+
+        initialize_parent_account(parent_account, "10-assets")  # Assuming "10-assets" as default account type
+
+        # Loop through each sub-account and update balances
+        for sub_account in sub_accounts:
+            sub_account_name = sub_account['name'] if isinstance(sub_account, dict) else sub_account
+            if sub_account_name in report_data[parent_account]['sub_account_details']:
+                report_data[parent_account]['sub_account_details'][sub_account_name] += total_invoice_amount
+
+        # Update the total invoice amount for the parent account
+        report_data[parent_account]['total_invoice_amount'] += total_invoice_amount
+
+    # Collect data from CashReceiptJournal (debit transactions)
+    receipt_data = db.session.query(
+        CashReceiptJournal.parent_account,
+        CashReceiptJournal.sub_accounts,
+        func.sum(CashReceiptJournal.total).label('total_receipts')
+    ).group_by(CashReceiptJournal.parent_account, CashReceiptJournal.sub_accounts).all()
+
+    # Process receipt data (debits)
+    for row in receipt_data:
+        parent_account = row.parent_account
+        sub_accounts = parse_sub_accounts(row.sub_accounts)
+        total_receipts = row.total_receipts
+
+        initialize_parent_account(parent_account, "10-assets")
+
+        # Loop through each sub-account and update balances
+        for sub_account in sub_accounts:
+            sub_account_name = sub_account['name'] if isinstance(sub_account, dict) else sub_account
+            if sub_account_name in report_data[parent_account]['sub_account_details']:
+                report_data[parent_account]['sub_account_details'][sub_account_name] += total_receipts
+
+        # Update the total receipts for the parent account
+        report_data[parent_account]['total_receipts'] += total_receipts
+
+    # Collect data from CashDisbursementJournal (credit transactions)
+    disbursement_data = db.session.query(
+        CashDisbursementJournal.parent_account,
+        CashDisbursementJournal.sub_accounts,
+        func.sum(CashDisbursementJournal.total).label('total_disbursements')
+    ).group_by(CashDisbursementJournal.parent_account, CashDisbursementJournal.sub_accounts).all()
+
+    # Process disbursement data (credits)
+    for row in disbursement_data:
+        parent_account = row.parent_account
+        sub_accounts = parse_sub_accounts(row.sub_accounts)
+        total_disbursements = row.total_disbursements
+
+        initialize_parent_account(parent_account, "20-Liabilities")  # Assuming "20-Liabilities" as default account type
+
+        # Loop through each sub-account and update balances (subtracting for credits)
+        for sub_account in sub_accounts:
+            sub_account_name = sub_account['name'] if isinstance(sub_account, dict) else sub_account
+            if sub_account_name in report_data[parent_account]['sub_account_details']:
+                report_data[parent_account]['sub_account_details'][sub_account_name] -= total_disbursements
+
+        # Update the total disbursements for the parent account
+        report_data[parent_account]['total_disbursements'] += total_disbursements
+
+    # Now calculate the closing balances
+    for parent_account in report_data:
+        closing_balance = (
+            report_data[parent_account]['total_invoice_amount'] +
+            report_data[parent_account]['total_receipts'] -
+            report_data[parent_account]['total_disbursements']
+        )
+        report_data[parent_account]['closing_balance'] = closing_balance
+
+    return report_data
+
+@app.route('/general_report', methods=['GET'])
+def general_report():
+    report_data = generate_general_report_with_sub_accounts()
+    return jsonify(report_data)
+
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+
+
+@app.route('/get_debited_credited_accounts', methods=['GET'])
+def get_debited_credited_accounts():
+    try:
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
+        # Debugging the fetched chart of accounts
+        if not chart_of_accounts:
+            logger.warning("No chart of accounts found in the database.")
+        else:
+            logger.debug("Fetched chart of accounts: %s", chart_of_accounts)
+
+        # Create a list to hold the account data
+        account_data = []
+
+        # Loop through each account to fetch sub_account_details and log them
+        for account in chart_of_accounts:
+            if account.sub_account_details:
+                for sub_account in account.sub_account_details:
+                    if isinstance(sub_account, dict) and 'name' in sub_account and 'opening_balance' in sub_account:
+                        account_data.append({
+                            'account_name': account.account_name,
+                            'amount': sub_account['opening_balance'],  # Assuming 'opening_balance' is the amount
+                            'parent_account': account.parent_account,
+                            'sub_account': sub_account['name']
+                        })
+
+        # Fetch Cash Receipt Journals (Incoming Transactions)
+        cash_receipts = CashReceiptJournal.query.all()
+
+        # Fetch Cash Disbursement Journals (Outgoing Transactions)
+        cash_disbursements = CashDisbursementJournal.query.all()
+
+        # Fetch Invoices
+        invoices = InvoiceIssued.query.all()
+
+        # Prepare to append transactions to account_data
+        transactions = []
+
+        # Process each cash receipt and disbursement to add opening balances if necessary
+        for receipt in cash_receipts:
+            sub_account_balance = get_opening_balance_for_debited_account(receipt.account_debited)
+            transaction = {
+                "type": "Receipt",
+                "receipt_no": receipt.receipt_no,
+                "date": receipt.receipt_date,
+                "from_whom_received": receipt.from_whom_received,
+                "account_class": receipt.account_class,
+                "account_type": receipt.account_type,
+                "total_amount": receipt.total,
+                "account_debited": receipt.account_debited,
+                "account_credited": receipt.account_credited,
+                'parent_account': receipt.parent_account,
+                "bank": receipt.bank,
+                "cash": receipt.cash,
+                "created_by": receipt.created_by_user.username if receipt.created_by_user else None,
+            }
+            if sub_account_balance:
+                transaction['opening_balance'] = sub_account_balance
+            transactions.append(transaction)
+
+        for disbursement in cash_disbursements:
+            sub_account_balance = get_opening_balance_for_debited_account(disbursement.account_debited)
+            transaction = {
+                "type": "Disbursement",
+                "cheque_no": disbursement.cheque_no,
+                "date": disbursement.disbursement_date,
+                "to_whom_paid": disbursement.to_whom_paid,
+                "account_class": disbursement.account_class,
+                "account_type": disbursement.account_type,
+                "total_amount": disbursement.total,
+                "account_debited": disbursement.account_debited,
+                'parent_account': disbursement.parent_account,
+                "account_credited": disbursement.account_credited,
+                "bank": disbursement.bank,
+                "cash": disbursement.cash,
+                "created_by": disbursement.created_by_user.username if disbursement.created_by_user else None,
+            }
+            if sub_account_balance:
+                transaction['opening_balance'] = sub_account_balance
+            transactions.append(transaction)
+
+        for invoice in invoices:
+            # Ensure we are fetching the correct opening balance for the account debited
+            sub_account_balance = get_opening_balance_for_debited_account(invoice.account_debited)
+
+            # Prepare invoice data
+            invoice_data = {
+                'type': 'Invoice',
+                'invoice_number': invoice.invoice_number,
+                'date_issued': invoice.date_issued,
+                "account_class": invoice.account_class,
+                "account_type": invoice.account_type,
+                'parent_account': invoice.parent_account,
+                'total_amount': invoice.amount,
+                'account_debited': invoice.account_debited,
+                'account_credited': invoice.account_credited,
+                'grn_number': invoice.grn_number,
+                'created_by': invoice.user.username if invoice.user else None,
+            }
+
+            # Only add opening_balance to the response, do not assign it to debited account
+            if sub_account_balance:
+                invoice_data['opening_balance'] = sub_account_balance
+            account_data.append(invoice_data)
+
+        # Combine account data and transactions data
+        account_data.extend(transactions)
+
+        # Return the result as a JSON response
+        if account_data:
+            return jsonify({"data": account_data, "status": "success"}), 200
+        else:
+            logger.info("No transactions found to display.")
+            return jsonify({"data": [], "status": "success"}), 200
+
+    except Exception as e:
+        logger.error("Error processing accounts and transactions: %s", e)
+        return jsonify({"data": [], "status": "error", "message": str(e)}), 500
+
+def get_opening_balance_for_debited_account(account_debited):
+    try:
+        logger.debug(f"Fetching opening balance for: {account_debited}")
+
+        # Iterate through all accounts and check their sub_account_details
+        for account in ChartOfAccounts.query.all():
+            if account.sub_account_details:
+                for sub_account in account.sub_account_details:
+                    logger.debug(f"Checking sub-account: {sub_account.get('name')}")
+                    if sub_account.get('name') == account_debited:
+                        opening_balance = float(sub_account.get('opening_balance', 0.0))
+                        logger.debug(f"Found opening balance: {opening_balance}")
+                        return opening_balance
+
+        logger.warning(f"No opening balance found for: {account_debited}")
+        return 0.0
+    except Exception as e:
+        logger.error(f"Error fetching opening balance for {account_debited}: {e}")
+        return 0.0
+    
+    
+    
+    
+@app.route('/get_trial_balance', methods=['GET'])
+def get_trial_balance():
+    try:
+        # Initialize a list to store log entries
+        log_entries = []
+
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
+        if not chart_of_accounts:
+            log_entries.append("WARNING: No chart of accounts found in the database.")
+        else:
+            log_entries.append("DEBUG: Fetched chart of accounts:")
+            for account in chart_of_accounts:
+                log_entries.append(f"DEBUG: Account ID: {account.id}, Account Name: {account.account_name}, Parent Account: {account.parent_account}, Account Type: {account.account_type}")
+
+        # Group accounts by parent account and add subaccounts to each parent account
+        grouped_accounts = {}
+        
+        for account in chart_of_accounts:
+            # Initialize the parent account if it doesn't exist
+            if account.parent_account not in grouped_accounts:
+                grouped_accounts[account.parent_account] = []
+
+            # Add subaccount details (if any)
+            subaccounts = account.sub_account_details if hasattr(account, 'sub_account_details') else []
+
+            # Add the account with its subaccounts and account_type to the grouped data
+            grouped_accounts[account.parent_account].append({
+                "account_name": account.account_name,
+                "account_type": account.account_type,  # Include account type
+                "sub_accounts": subaccounts,
+            })
+
+        # Initialize a dictionary to track debits and credits for each account
+        trial_balance = {}
+
+        # Fetch Cash Receipt Journals (Incoming Transactions)
+        cash_receipts = CashReceiptJournal.query.all()
+
+        # Fetch Cash Disbursement Journals (Outgoing Transactions)
+        cash_disbursements = CashDisbursementJournal.query.all()
+
+        # Fetch Invoices
+        invoices = InvoiceIssued.query.all()
+
+        # Process each cash receipt and disbursement
+        for receipt in cash_receipts:
+            process_transaction(receipt.account_debited, receipt.total, trial_balance, is_debit=True)
+            process_transaction(receipt.account_credited, receipt.total, trial_balance, is_debit=False)
+
+        for disbursement in cash_disbursements:
+            process_transaction(disbursement.account_debited, disbursement.total, trial_balance, is_debit=True)
+            process_transaction(disbursement.account_credited, disbursement.total, trial_balance, is_debit=False)
+
+        for invoice in invoices:
+            process_transaction(invoice.account_debited, invoice.amount, trial_balance, is_debit=True)
+            process_transaction(invoice.account_credited, invoice.amount, trial_balance, is_debit=False)
+
+        # Prepare trial balance data
+        trial_balance_data = []
+
+        for parent_account, accounts in grouped_accounts.items():
+            for account in accounts:
+                # Include the parent account name in the final data
+                for subaccount in account['sub_accounts']:
+                    subaccount_name = subaccount['name']
+                    balance_type = subaccount.get('balance_type', 'debit')  # Default to 'debit'
+
+                    # Process subaccount balances
+                    balance = trial_balance.get(subaccount_name, {'debit': 0.0, 'credit': 0.0})
+
+                    # Calculate the balance based on debit and credit values
+                    account_balance = balance['debit'] - balance['credit']
+
+                    # Create account data structure with both parent and subaccount information
+                    account_data = {
+                        'parent_account': parent_account,
+                        'account_name': subaccount_name,
+                        'debit': balance['debit'],
+                        'credit': balance['credit'],
+                        'balance': account_balance,
+                        'balance_type': balance_type,
+                        'account_type': account['account_type']  # Add account type here
+                    }
+
+                    trial_balance_data.append(account_data)
+
+        # Return the trial balance along with log entries
+        return jsonify({
+            "data": trial_balance_data,
+            "status": "success",
+            "logs": log_entries  # Adding logs to the response
+        }), 200
+
+    except Exception as e:
+        logger.error("Error processing trial balance: %s", e)
+        return jsonify({
+            "data": [],
+            "status": "error",
+            "message": str(e),
+            "logs": []  # In case of an error, send empty logs
+        }), 500
+
+
+def process_transaction(account_name, amount, trial_balance, is_debit):
+    """
+    Process each transaction (either debit or credit) and update the trial balance dictionary.
+    
+    :param account_name: The name of the account being updated
+    :param amount: The amount of the transaction
+    :param trial_balance: The dictionary to store trial balance details
+    :param is_debit: Boolean flag to determine if it's a debit (True) or credit (False)
+    """
+    # Check if account already exists in the trial_balance dictionary
+    if account_name not in trial_balance:
+        trial_balance[account_name] = {'debit': 0.0, 'credit': 0.0}
+    
+    # Process debit or credit
+    if is_debit:
+        trial_balance[account_name]['debit'] += amount
+    else:
+        trial_balance[account_name]['credit'] += amount
+
+
+def get_parent_account_name(parent_account_id_or_name):
+    """
+    Fetch the parent account name for a given account, handling both parent_account_id and parent_account_name.
+    """
+    if parent_account_id_or_name:
+        # Check if the value is an ID (integer) or name (string)
+        if isinstance(parent_account_id_or_name, int):
+            # Lookup by ID if it's an integer
+            parent_account = ChartOfAccounts.query.filter_by(id=parent_account_id_or_name).first()
+        elif isinstance(parent_account_id_or_name, str):
+            # Lookup by name if it's a string
+            parent_account = ChartOfAccounts.query.filter_by(account_name=parent_account_id_or_name).first()
+        else:
+            # If the type isn't expected, return Unknown
+            parent_account = None
+
+        if parent_account:
+            logger.debug(f"DEBUG: Found parent account: {parent_account.account_name}, Parent Account ID: {parent_account.id}")
+            return parent_account.account_name  # Return the account's name
+        else:
+            # If parent account not found, log it and return 'Unknown'
+            logger.warning(f"WARNING: Parent account '{parent_account_id_or_name}' not found in the Chart of Accounts.")
+            return "Unknown"
+    else:
+        logger.warning("WARNING: Parent account ID or name is missing.")
+        return "Unknown"
+
+
+
+
+
+
+
 
 
 
