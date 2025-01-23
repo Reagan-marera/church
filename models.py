@@ -121,6 +121,7 @@ class InvoiceIssued(db.Model):
     date_issued = db.Column(db.Date, nullable=False)
     account_class = db.Column(db.String(100), nullable=False)
     account_type = db.Column(db.String(100), nullable=False)
+    invoice_type = db.Column(db.String(100), nullable=False)
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
     parent_account = db.Column(db.String(150), nullable=False)

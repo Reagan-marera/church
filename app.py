@@ -614,16 +614,32 @@ def manage_invoices():
                 'description': inv.description,
                 'grn_number': inv.grn_number,
                 'parent_account': inv.parent_account,
-                'sub_accounts': inv.sub_accounts
+                'sub_accounts': inv.sub_accounts,
+                'invoice_type': inv.invoice_type  # Include invoice_type in response
             } for inv in invoices]), 200
 
         elif request.method == 'POST':
             data = request.get_json()
 
+            # Validate required fields
+            required_fields = ['invoice_number', 'account_type', 'amount', 'account_class', 'parent_account', 'invoice_type']
+            for field in required_fields:
+                if field not in data:
+                    return jsonify({'error': f'Missing required field: {field}'}), 400
+
             # Handle date_issued conversion and sub_accounts as a dictionary
             date_issued_str = data.get('date_issued')
-            date_issued = datetime.fromisoformat(date_issued_str) if date_issued_str else None
+            try:
+                date_issued = datetime.fromisoformat(date_issued_str) if date_issued_str else None
+            except ValueError:
+                return jsonify({'error': 'Invalid date format for date_issued. Use ISO format (YYYY-MM-DD)'}), 400
+
             sub_accounts = data.get('sub_accounts', {})
+
+            # Check for uniqueness of invoice_number per user
+            existing_invoice = InvoiceIssued.query.filter_by(user_id=user_id, invoice_number=data['invoice_number']).first()
+            if existing_invoice:
+                return jsonify({'error': 'Invoice number already exists for this user'}), 400
 
             # Create and save the new invoice with the user_id
             new_invoice = InvoiceIssued(
@@ -638,7 +654,8 @@ def manage_invoices():
                 grn_number=data.get('grn_number'),
                 user_id=user_id,  # Use the user_id from the current_user
                 parent_account=data['parent_account'],
-                sub_accounts=sub_accounts
+                sub_accounts=sub_accounts,
+                invoice_type=data['invoice_type']  # Make sure invoice_type is passed as part of the data
             )
 
             db.session.add(new_invoice)
@@ -671,6 +688,10 @@ def update_delete_invoice(id):
                 if not isinstance(sub_accounts, dict):
                     return jsonify({'error': 'sub_accounts must be a valid JSON object.'}), 400
                 invoice.sub_accounts = sub_accounts
+
+            # Ensure 'invoice_type' is provided and valid (if needed)
+            if 'invoice_type' in data:
+                invoice.invoice_type = data['invoice_type']
 
             # Update fields if provided
             if 'invoice_number' in data:
@@ -2367,6 +2388,7 @@ def get_opening_balance_for_debited_account(account_debited):
     except Exception as e:
         logger.error(f"Error fetching opening balance for {account_debited}: {e}")
         return 0.0
+
     
     
     
@@ -2527,8 +2549,260 @@ def get_parent_account_name(parent_account_id_or_name):
 
 
 
+@app.route('/get_income_statement', methods=['GET'])
+def get_income_statement():
+    try:
+        # Initialize a list to store log entries
+        log_entries = []
+
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
+        if not chart_of_accounts:
+            log_entries.append("WARNING: No chart of accounts found in the database.")
+        else:
+            log_entries.append("DEBUG: Fetched chart of accounts:")
+            for account in chart_of_accounts:
+                log_entries.append(f"DEBUG: Account ID: {account.id}, Account Name: {account.account_name}, Parent Account: {account.parent_account}, Account Type: {account.account_type}")
+
+        # Group accounts by parent account and add subaccounts to each parent account
+        grouped_accounts = {}
+        
+        for account in chart_of_accounts:
+            # Only include revenue (starting with "40") and expense (starting with "50") accounts
+            if account.account_type.startswith("40") or account.account_type.startswith("50"):
+                # Initialize the parent account if it doesn't exist
+                if account.parent_account not in grouped_accounts:
+                    grouped_accounts[account.parent_account] = []
+
+                # Add subaccount details (if any)
+                subaccounts = account.sub_account_details if hasattr(account, 'sub_account_details') else []
+
+                # Add the account with its subaccounts and account_type to the grouped data
+                grouped_accounts[account.parent_account].append({
+                    "account_name": account.account_name,
+                    "account_type": account.account_type,  # Include account type
+                    "sub_accounts": subaccounts,
+                })
+
+        # Initialize a dictionary to track debits and credits for each account
+        trial_balance = {}
+
+        # Fetch Cash Receipt Journals (Incoming Transactions)
+        cash_receipts = CashReceiptJournal.query.all()
+
+        # Fetch Cash Disbursement Journals (Outgoing Transactions)
+        cash_disbursements = CashDisbursementJournal.query.all()
+
+        # Fetch Invoices
+        invoices = InvoiceIssued.query.all()
+
+        # Process each cash receipt and disbursement
+        for receipt in cash_receipts:
+            process_transaction(receipt.account_debited, receipt.total, trial_balance, is_debit=True)
+            process_transaction(receipt.account_credited, receipt.total, trial_balance, is_debit=False)
+
+        for disbursement in cash_disbursements:
+            process_transaction(disbursement.account_debited, disbursement.total, trial_balance, is_debit=True)
+            process_transaction(disbursement.account_credited, disbursement.total, trial_balance, is_debit=False)
+
+        for invoice in invoices:
+            process_transaction(invoice.account_debited, invoice.amount, trial_balance, is_debit=True)
+            process_transaction(invoice.account_credited, invoice.amount, trial_balance, is_debit=False)
+
+        # Initialize revenue and expense totals
+        total_revenue = 0.0
+        total_expenses = 0.0
+
+        # Prepare income statement data
+        income_statement_data = []
+
+        # Loop through the grouped accounts and only include revenue/expense accounts
+        for parent_account, accounts in grouped_accounts.items():
+            for account in accounts:
+                for subaccount in account['sub_accounts']:
+                    subaccount_name = subaccount['name']
+                    balance_type = subaccount.get('balance_type', 'debit')  # Default to 'debit'
+
+                    # Process subaccount balances
+                    balance = trial_balance.get(subaccount_name, {'debit': 0.0, 'credit': 0.0})
+
+                    # Calculate the balance based on debit and credit values
+                    account_balance = balance['debit'] - balance['credit']
+
+                    # Check if it's a revenue or expense based on account_type
+                    if account['account_type'].startswith("40"):  # Revenue (e.g., "40-Sales")
+                        total_revenue += account_balance
+                    elif account['account_type'].startswith("50"):  # Expenses (e.g., "50-Expenses")
+                        total_expenses += account_balance
+
+                    # Include all the details like in trial balance for income statement accounts only
+                    account_data = {
+                        'parent_account': parent_account,
+                        'account_name': subaccount_name,
+                        'debit': balance['debit'],
+                        'credit': balance['credit'],
+                        'balance': account_balance,
+                        'balance_type': balance_type,
+                        'account_type': account['account_type'],  # Add account type here
+                    }
+
+                    # Add the account data to the income statement details
+                    income_statement_data.append(account_data)
+
+        # Calculate net income
+        net_income = total_revenue - total_expenses
+
+        # Return the income statement along with log entries
+        return jsonify({
+            "data": {
+                "revenue": total_revenue,
+                "expenses": total_expenses,
+                "net_income": net_income,
+                "details": income_statement_data
+            },
+            "status": "success",
+            "logs": log_entries  # Adding logs to the response
+        }), 200
+
+    except Exception as e:
+        logger.error("Error processing income statement: %s", e)
+        return jsonify({
+            "data": [],
+            "status": "error",
+            "message": str(e),
+            "logs": []  # In case of an error, send empty logs
+        }), 500
 
 
+@app.route('/get_balance_sheet', methods=['GET'])
+def get_balance_sheet():
+    try:
+        # Initialize a list to store log entries
+        log_entries = []
+
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
+        if not chart_of_accounts:
+            log_entries.append("WARNING: No chart of accounts found in the database.")
+        else:
+            log_entries.append("DEBUG: Fetched chart of accounts:")
+            for account in chart_of_accounts:
+                log_entries.append(f"DEBUG: Account ID: {account.id}, Account Name: {account.account_name}, Parent Account: {account.parent_account}, Account Type: {account.account_type}")
+
+        # Group accounts by parent account and add subaccounts to each parent account
+        grouped_accounts = {}
+
+        for account in chart_of_accounts:
+            # Only include asset (starting with "10"), liability (starting with "20"), and equity (starting with "30") accounts
+            if account.account_type.startswith("10") or account.account_type.startswith("20") or account.account_type.startswith("30"):
+                # Initialize the parent account if it doesn't exist
+                if account.parent_account not in grouped_accounts:
+                    grouped_accounts[account.parent_account] = []
+
+                # Add subaccount details (if any)
+                subaccounts = account.sub_account_details if hasattr(account, 'sub_account_details') else []
+
+                # Add the account with its subaccounts and account_type to the grouped data
+                grouped_accounts[account.parent_account].append({
+                    "account_name": account.account_name,
+                    "account_type": account.account_type,  # Include account type
+                    "sub_accounts": subaccounts,
+                })
+
+        # Initialize a dictionary to track debits and credits for each account
+        trial_balance = {}
+
+        # Fetch Cash Receipt Journals (Incoming Transactions)
+        cash_receipts = CashReceiptJournal.query.all()
+
+        # Fetch Cash Disbursement Journals (Outgoing Transactions)
+        cash_disbursements = CashDisbursementJournal.query.all()
+
+        # Fetch Invoices
+        invoices = InvoiceIssued.query.all()
+
+        # Process each cash receipt and disbursement
+        for receipt in cash_receipts:
+            process_transaction(receipt.account_debited, receipt.total, trial_balance, is_debit=True)
+            process_transaction(receipt.account_credited, receipt.total, trial_balance, is_debit=False)
+
+        for disbursement in cash_disbursements:
+            process_transaction(disbursement.account_debited, disbursement.total, trial_balance, is_debit=True)
+            process_transaction(disbursement.account_credited, disbursement.total, trial_balance, is_debit=False)
+
+        for invoice in invoices:
+            process_transaction(invoice.account_debited, invoice.amount, trial_balance, is_debit=True)
+            process_transaction(invoice.account_credited, invoice.amount, trial_balance, is_debit=False)
+
+        # Initialize totals for assets, liabilities, and equity
+        total_assets = 0.0
+        total_liabilities = 0.0
+        total_equity = 0.0
+
+        # Prepare balance sheet data
+        balance_sheet_data = []
+
+        # Loop through the grouped accounts and only include asset, liability, or equity accounts
+        for parent_account, accounts in grouped_accounts.items():
+            for account in accounts:
+                for subaccount in account['sub_accounts']:
+                    subaccount_name = subaccount['name']
+                    balance_type = subaccount.get('balance_type', 'debit')  # Default to 'debit'
+
+                    # Process subaccount balances
+                    balance = trial_balance.get(subaccount_name, {'debit': 0.0, 'credit': 0.0})
+
+                    # Calculate the balance based on debit and credit values
+                    account_balance = balance['debit'] - balance['credit']
+
+                    # Check if it's an asset, liability, or equity based on account_type
+                    if account['account_type'].startswith("10"):  # Assets (e.g., "10-Cash")
+                        total_assets += account_balance
+                    elif account['account_type'].startswith("20"):  # Liabilities (e.g., "20-Loans")
+                        total_liabilities += account_balance
+                    elif account['account_type'].startswith("30"):  # Equity (e.g., "30-Owner's Equity")
+                        total_equity += account_balance
+
+                    # Include all the details like in trial balance for balance sheet accounts only
+                    account_data = {
+                        'parent_account': parent_account,
+                        'account_name': subaccount_name,
+                        'debit': balance['debit'],
+                        'credit': balance['credit'],
+                        'balance': account_balance,
+                        'balance_type': balance_type,
+                        'account_type': account['account_type'],  # Add account type here
+                    }
+
+                    # Add the account data to the balance sheet details
+                    balance_sheet_data.append(account_data)
+
+        # Ensure assets equal liabilities and equity
+        balance_check = total_assets == (total_liabilities + total_equity)
+
+        # Return the balance sheet along with log entries
+        return jsonify({
+            "data": {
+                "assets": total_assets,
+                "liabilities": total_liabilities,
+                "equity": total_equity,
+                "balance_check": balance_check,  # Ensure the balance is correct
+                "details": balance_sheet_data
+            },
+            "status": "success",
+            "logs": log_entries  # Adding logs to the response
+        }), 200
+
+    except Exception as e:
+        logger.error("Error processing balance sheet: %s", e)
+        return jsonify({
+            "data": [],
+            "status": "error",
+            "message": str(e),
+            "logs": []  # In case of an error, send empty logs
+        }), 500
 
 
 
