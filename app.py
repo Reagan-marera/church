@@ -3082,8 +3082,222 @@ def get_balance_sheet():
             "logs": []  # In case of an error, send empty logs
         }), 500
 
+@app.route('/get_subaccount_details', methods=['GET'])
+@jwt_required()
+def get_subaccount_details():
+    current_user_identity = get_jwt_identity()
+    current_user_id = current_user_identity.get('username')
+
+    # Fetch user object based on the username
+    user = User.query.filter_by(username=current_user_id).first()
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    user_id = user.id
+
+    # Query ChartOfAccounts, Payees, and Customers for the user
+    chart_of_accounts = ChartOfAccounts.query.filter_by(user_id=user_id).all()
+    payees = Payee.query.filter_by(user_id=user_id).all()
+    customers = Customer.query.filter_by(user_id=user_id).all()
+
+    subaccounts = []
+
+    # Debug: Print the fetched records
+    print(f"Found {len(chart_of_accounts)} ChartOfAccounts records.")
+    print(f"Found {len(payees)} Payees records.")
+    print(f"Found {len(customers)} Customers records.")
+
+    # Process ChartOfAccounts subaccounts
+    for account in chart_of_accounts:
+        print(f"Processing account: {account.account_name}")
+        sub_account_details = account.sub_account_details or []
+        print(f"Subaccount details for {account.account_name}: {sub_account_details}")  # Debugging
+        if isinstance(sub_account_details, list):  # Ensure it's a list
+            for details in sub_account_details:
+                print(f"Subaccount details (ChartOfAccounts): {details}")  # Debugging
+                sub_account_name = details.get('name', '')  # Adjusted to use 'name'
+                debit = details.get('debit', 0)
+                credit = details.get('credit', 0)
+                if sub_account_name:  # Only add subaccounts with a name
+                    # Debugging prints to verify debit/credit
+                    print(f"Adding subaccount: {sub_account_name}, Debit: {debit}, Credit: {credit}")
+                    subaccounts.append({
+                        'sub_account_name': sub_account_name,
+                        'description': details.get('description', ''),
+                        'opening_balance': details.get('opening_balance', 0),
+                        'debit': debit,  # Debit value
+                        'credit': credit  # Credit value
+                    })
+
+    # Process Payees subaccounts
+    for payee in payees:
+        print(f"Processing Payee: {payee.account_name}")
+        sub_account_details = payee.sub_account_details or []
+        print(f"Subaccount details for {payee.account_name}: {sub_account_details}")  # Debugging
+        if isinstance(sub_account_details, list):  # Ensure it's a list
+            for details in sub_account_details:
+                print(f"Subaccount details (Payee): {details}")  # Debugging
+                sub_account_name = details.get('name', '')  # Adjusted to use 'name'
+                debit = details.get('debit', 0)
+                credit = details.get('credit', 0)
+                if sub_account_name:
+                    print(f"Adding subaccount (Payee): {sub_account_name}, Debit: {debit}, Credit: {credit}")
+                    subaccounts.append({
+                        'sub_account_name': sub_account_name,
+                        'description': details.get('description', ''),
+                        'opening_balance': details.get('opening_balance', 0),
+                        'debit': debit,
+                        'credit': credit
+                    })
+
+    # Process Customer subaccounts
+    for customer in customers:
+        print(f"Processing Customer: {customer.account_name}")
+        sub_account_details = customer.sub_account_details or []
+        print(f"Subaccount details for {customer.account_name}: {sub_account_details}")  # Debugging
+        if isinstance(sub_account_details, list):  # Ensure it's a list
+            for details in sub_account_details:
+                print(f"Subaccount details (Customer): {details}")  # Debugging
+                sub_account_name = details.get('name', '')  # Adjusted to use 'name'
+                debit = details.get('debit', 0)
+                credit = details.get('credit', 0)
+                if sub_account_name:
+                    print(f"Adding subaccount (Customer): {sub_account_name}, Debit: {debit}, Credit: {credit}")
+                    subaccounts.append({
+                        'sub_account_name': sub_account_name,
+                        'description': details.get('description', ''),
+                        'opening_balance': details.get('opening_balance', 0),
+                        'debit': debit,
+                        'credit': credit
+                    })
+
+    # Debugging: Print the number of subaccounts collected
+    print(f"Total subaccounts collected: {len(subaccounts)}")
+
+    # Return subaccounts
+    if not subaccounts:
+        print("No subaccounts found.")  # Debugging message if subaccounts are empty
+    return jsonify({'subaccounts': subaccounts})
 
 
+@app.route('/update_subaccount/<int:account_id>/<string:subaccount_name>', methods=['PUT'])
+@jwt_required()
+def update_subaccount(account_id, subaccount_name):
+    # Get current user identity
+    current_user_identity = get_jwt_identity()
+    current_user_id = current_user_identity.get('username')
+    
+    # Fetch user_id from User table based on username
+    user = User.query.filter_by(username=current_user_id).first()
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    user_id = user.id  # Get user ID
+    
+    # Fetch the account (ChartOfAccounts, Payee, or Customer)
+    account = ChartOfAccounts.query.get(account_id) or Payee.query.get(account_id) or Customer.query.get(account_id)
+    
+    if not account:
+        return jsonify({'message': 'Account not found'}), 404
+
+    # Check if the current user owns this account
+    if account.user_id != user_id:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    # Get the subaccount details from the request
+    data = request.get_json()
+    subaccount_details = data.get('sub_account_details')
+
+    if not subaccount_details:
+        return jsonify({'message': 'No subaccount details provided'}), 400
+
+    # Ensure the subaccount exists in the account's sub_account_details
+    if subaccount_name not in account.sub_account_details:
+        return jsonify({'message': 'Subaccount not found'}), 404
+
+    # Update the subaccount's details
+    account.sub_account_details[subaccount_name] = subaccount_details
+
+    # Commit the changes to the database
+    db.session.commit()
+
+    return jsonify({'message': 'Subaccount updated successfully'})
+
+@app.route('/add_subaccount/<int:account_id>', methods=['POST'])
+@jwt_required()
+def add_subaccount(account_id):
+    # Get current user identity
+    current_user_identity = get_jwt_identity()
+    current_user_id = current_user_identity.get('username')
+    
+    # Fetch user_id from User table based on username
+    user = User.query.filter_by(username=current_user_id).first()
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    user_id = user.id  # Get user ID
+    
+    # Fetch the account (ChartOfAccounts, Payee, or Customer)
+    account = ChartOfAccounts.query.get(account_id) or Payee.query.get(account_id) or Customer.query.get(account_id)
+    
+    if not account:
+        return jsonify({'message': 'Account not found'}), 404
+
+    # Check if the current user owns this account
+    if account.user_id != user_id:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    # Get the subaccount details from the request
+    data = request.get_json()
+    subaccount_name = data.get('sub_account_name')
+    subaccount_details = data.get('sub_account_details')
+
+    if not subaccount_name or not subaccount_details:
+        return jsonify({'message': 'Subaccount name or details are missing'}), 400
+
+    # Add the new subaccount details to the account
+    account.sub_account_details[subaccount_name] = subaccount_details
+
+    # Commit the changes to the database
+    db.session.commit()
+
+    return jsonify({'message': 'Subaccount added successfully'})
+
+@app.route('/delete_subaccount/<int:account_id>/<string:subaccount_name>', methods=['DELETE'])
+@jwt_required()
+def delete_subaccount(account_id, subaccount_name):
+    # Get current user identity
+    current_user_identity = get_jwt_identity()
+    current_user_id = current_user_identity.get('username')
+    
+    # Fetch user_id from User table based on username
+    user = User.query.filter_by(username=current_user_id).first()
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    user_id = user.id  # Get user ID
+    
+    # Fetch the account (ChartOfAccounts, Payee, or Customer)
+    account = ChartOfAccounts.query.get(account_id) or Payee.query.get(account_id) or Customer.query.get(account_id)
+    
+    if not account:
+        return jsonify({'message': 'Account not found'}), 404
+
+    # Check if the current user owns this account
+    if account.user_id != user_id:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    # Check if the subaccount exists
+    if subaccount_name not in account.sub_account_details:
+        return jsonify({'message': 'Subaccount not found'}), 404
+
+    # Delete the subaccount
+    del account.sub_account_details[subaccount_name]
+
+    # Commit the changes to the database
+    db.session.commit()
+
+    return jsonify({'message': 'Subaccount deleted successfully'})
 
 if __name__ == '__main__':
     app.run(debug=True)
