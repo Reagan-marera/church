@@ -17,11 +17,12 @@ class Church(db.Model):
     # Relationship with User (one church can have many members and a church CEO)
     members = db.relationship('User', back_populates='church', lazy=True)
     tithe_pledges = db.relationship('TithePledge', back_populates='church', lazy=True)
+
     def __repr__(self):
         return f'<Church {self.name}>'
-    
-    
 
+
+# TithePledge Model
 class TithePledge(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     amount_pledged = db.Column(db.Float, nullable=False)  # Monthly pledge amount
@@ -30,6 +31,7 @@ class TithePledge(db.Model):
     member_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     church_id = db.Column(db.Integer, db.ForeignKey('church.id'), nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)  # Add this line for timestamp
+
     # Relationships
     member = db.relationship('User', back_populates='tithe_pledges')
     church = db.relationship('Church', back_populates='tithe_pledges')
@@ -51,7 +53,9 @@ class TithePledge(db.Model):
         # Apply a payment to the pledge, reducing the remaining amount
         self.remaining_amount -= amount
         db.session.commit()
-        
+
+
+# Payment Model
 class Payment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     amount = db.Column(db.Float, nullable=False)
@@ -79,6 +83,7 @@ class User(db.Model):
     member_number = db.Column(db.String(50), unique=True, nullable=True)
     tithe_pledges = db.relationship('TithePledge', back_populates='member', lazy=True)
     church_name = db.Column(db.String(100))  # <-- Add this line to define 'church_name'
+    
     # Foreign key for the church the user belongs to (only for members and church CEOs)
     church_id = db.Column(db.Integer, db.ForeignKey('church.id'), nullable=True)
     
@@ -95,11 +100,14 @@ class User(db.Model):
     # Relationship to other models like CashDisbursementJournal, CashReceiptJournal, and InvoiceIssued
     cash_disbursements = db.relationship('CashDisbursementJournal', back_populates='created_by_user')
     cash_receipts = db.relationship('CashReceiptJournal', back_populates='created_by_user')
-    invoices = db.relationship('InvoiceIssued', back_populates='user')
+    invoices_issued = db.relationship('InvoiceIssued', back_populates='user')
+    invoices_received = db.relationship('InvoiceReceived', back_populates='user')
 
     def __repr__(self):
         return f'<User {self.username} - {self.role}>'
 
+
+# ChartOfAccounts Model
 class ChartOfAccounts(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     parent_account = db.Column(db.String(150), nullable=False)
@@ -110,29 +118,57 @@ class ChartOfAccounts(db.Model):
     # Foreign key to link to User
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     user = db.relationship('User', backref=db.backref('chart_of_accounts', lazy=True))
+    invoices_received = db.relationship('InvoiceReceived', back_populates='chart_of_account')
 
     def __repr__(self):
         return f'<ChartOfAccounts {self.parent_account} - {self.account_name}>'
+
+
+# Payee Model
+class Payee(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    parent_account = db.Column(db.String(150), nullable=False)
+    account_name = db.Column(db.String(100), nullable=False)
+    account_type = db.Column(db.String(50), nullable=False)  # E.g., Asset, Liability, Equity
+    sub_account_details = db.Column(db.JSON, nullable=True)  # Storing subaccounts as JSON
+    
+    # Foreign key to link to User
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('payees', lazy=True))
+
+    def __repr__(self):
+        return f'<Payee {self.parent_account} - {self.account_name}>'
+
+
+# Customer Model
+class Customer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    parent_account = db.Column(db.String(150), nullable=False)
+    account_name = db.Column(db.String(100), nullable=False)
+    account_type = db.Column(db.String(50), nullable=False)  # E.g., Asset, Liability, Equity
+    sub_account_details = db.Column(db.JSON, nullable=True)  # Storing subaccounts as JSON
+
+    # Foreign key to link to User
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('customers', lazy=True))
+
+    def __repr__(self):
+        return f'<Customer {self.parent_account} - {self.account_name}>'
+
 
 # InvoiceIssued Model
 class InvoiceIssued(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     invoice_number = db.Column(db.String(50), nullable=False)
     date_issued = db.Column(db.Date, nullable=False)
-    account_class = db.Column(db.String(100), nullable=False)
-    account_type = db.Column(db.String(100), nullable=False)
-    invoice_type = db.Column(db.String(100), nullable=False)
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
-    parent_account = db.Column(db.String(150), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
     coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
-    chart_of_account = db.relationship('ChartOfAccounts', backref=db.backref('invoices', lazy=True))
-    user = db.relationship('User', back_populates='invoices')
+    chart_of_account = db.relationship('ChartOfAccounts', backref=db.backref('invoices_issued', lazy=True))
+    user = db.relationship('User', back_populates='invoices_issued')
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
-    grn_number = db.Column(db.String(20), nullable=True)
-    sub_accounts = db.Column(db.JSON, nullable=True)
 
     # Add composite unique constraint on user_id and invoice_number
     __table_args__ = (
@@ -142,7 +178,32 @@ class InvoiceIssued(db.Model):
     def __repr__(self):
         return f'<InvoiceIssued {self.invoice_number}>'
 
-# Cash Receipt Journal model (updated)
+
+# InvoiceReceived Model
+class InvoiceReceived(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_number = db.Column(db.String(50), nullable=False)
+    date_issued = db.Column(db.Date, nullable=False)
+    description = db.Column(db.String(255), nullable=True)
+    amount = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
+    coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
+    chart_of_account = db.relationship('ChartOfAccounts', back_populates='invoices_received')
+    user = db.relationship('User', back_populates='invoices_received')
+    account_debited = db.Column(db.String(100), nullable=True)
+    account_credited = db.Column(db.String(100), nullable=True)
+    grn_number = db.Column(db.String(20), nullable=True)
+
+    # Add composite unique constraint on user_id and invoice_number
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'invoice_number', name='unique_invoice_per_user'),
+    )
+
+    def __repr__(self):
+        return f'<InvoiceReceived {self.invoice_number}>'
+
+
+# Cash Receipt Journal Model
 class CashReceiptJournal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     receipt_date = db.Column(db.Date, nullable=False)
@@ -150,15 +211,12 @@ class CashReceiptJournal(db.Model):
     ref_no = db.Column(db.String(50), nullable=True)
     from_whom_received = db.Column(db.String(255), nullable=False)
     description = db.Column(db.String(255), nullable=True)
-    account_class = db.Column(db.String(100), nullable=False)
-    account_type = db.Column(db.String(100), nullable=False)
     receipt_type = db.Column(db.String(50), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
     bank = db.Column(db.String(100), nullable=True)  # Nullable for bank field
     cash = db.Column(db.Float, nullable=True)
     total = db.Column(db.Float, nullable=False)
-    parent_account = db.Column(db.String(150), nullable=False)
     cashbook = db.Column(db.String(250), nullable=False) 
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_by_user = db.relationship('User', back_populates='cash_receipts')
@@ -181,7 +239,8 @@ class CashReceiptJournal(db.Model):
         db.session.add(self)
         db.session.commit()
 
-# Cash Disbursement Journal model
+
+# Cash Disbursement Journal Model
 class CashDisbursementJournal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     disbursement_date = db.Column(db.Date, nullable=False)
@@ -189,11 +248,8 @@ class CashDisbursementJournal(db.Model):
     p_voucher_no = db.Column(db.String(50), nullable=True)
     to_whom_paid = db.Column(db.String(100), nullable=False)
     payment_type = db.Column(db.String(255), nullable=True)
-    cashbook = db.Column(db.String(255), nullable=True)
     description = db.Column(db.String(255), nullable=True)
-    account_class = db.Column(db.String(50), nullable=False)
     account_type = db.Column(db.String(50), nullable=False)
-    parent_account = db.Column(db.String(150), nullable=False)
     account_credited = db.Column(db.String(100), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
     cashbook = db.Column(db.String(250), nullable=False) 
@@ -201,7 +257,6 @@ class CashDisbursementJournal(db.Model):
     cash = db.Column(db.Float, nullable=False, default=0.0)
     bank = db.Column(db.Float, nullable=False, default=0.0)  # Updated to Float for numeric values
     total = db.Column(db.Float, nullable=False, default=0.0)  # Added total column with a default value
-    sub_accounts = db.Column(db.JSON, nullable=True)
     
     # Foreign key to User
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -225,6 +280,8 @@ class CashDisbursementJournal(db.Model):
         UniqueConstraint('created_by', 'cheque_no', name='unique_receipt_per_user'),
     )
 
+
+# OTP Model
 class OTP(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)

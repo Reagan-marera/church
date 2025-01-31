@@ -2,7 +2,7 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment
+from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived
 from functools import wraps
 from werkzeug.security import generate_password_hash
 from flask_mail import Mail, Message
@@ -410,12 +410,8 @@ def get_all_transactions():
             'invoice_number': invoice.invoice_number,
             'date_issued': invoice.date_issued,
             'amount': invoice.amount,
-            'account_class': invoice.account_class,
-            'account_type': invoice.account_type,
             'account_debited': invoice.account_debited,
             'account_credited': invoice.account_credited,
-            'grn_number': invoice.grn_number,
-            'parent_account': invoice.parent_account  # Added parent_account
         } for invoice in invoices],
         
         'cash_receipts': [{
@@ -424,14 +420,11 @@ def get_all_transactions():
             'receipt_no': receipt.receipt_no,
             'from_whom_received': receipt.from_whom_received,
             'description': receipt.description,
-            'account_class': receipt.account_class,
-            'account_type': receipt.account_type,
             'receipt_type': receipt.receipt_type,
             'account_debited': receipt.account_debited,
             'account_credited': receipt.account_credited,
             'cash': receipt.cash,
             'total': receipt.total,
-            'parent_account': receipt.parent_account  # Added parent_account
         } for receipt in cash_receipts],
         
         'cash_disbursements': [{
@@ -441,13 +434,10 @@ def get_all_transactions():
             'to_whom_paid': disbursement.to_whom_paid,
             'payment_type': disbursement.payment_type,
             'description': disbursement.description,
-            'account_class': disbursement.account_class,
-            'account_type': disbursement.account_type,
             'account_debited': disbursement.account_debited,
             'account_credited': disbursement.account_credited,
             'cash': disbursement.cash,
             'bank': disbursement.bank,
-            'parent_account': disbursement.parent_account  # Added parent_account
         } for disbursement in cash_disbursements]
     }
 
@@ -515,40 +505,8 @@ def manage_chart_of_accounts():
         except Exception as e:
             db.session.rollback()  # Rollback on failure
             return jsonify({'error': f'Failed to create account, error: {str(e)}'}), 400
-@app.route('/update-subaccount-ids', methods=['POST'])
-@jwt_required()
-def update_subaccount_ids():
-    # Get the current user_id from the JWT (Make sure you're extracting just the id)
-    current_user_data = get_jwt_identity()  # This should return the JWT payload (likely a dictionary)
-    current_user_id = current_user_data.get('id')  # Extract the 'id' specifically
-
-    try:
-        # Retrieve all accounts for the current user
-        accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
-
-        # Variable to track the next available ID
-        next_id = 1
-
-        # Loop through each account and update its subaccounts if needed
-        for account in accounts:
-            # Loop through each subaccount for the current account
-            for sub_account in account.sub_account_details:
-                # Check if the subaccount has an 'id', if not, generate one
-                if 'id' not in sub_account or not sub_account['id']:
-                    sub_account['id'] = f"subaccount-{next_id}"
-                    next_id += 1  # Increment ID for the next subaccount
-
-            # Commit changes to the account (this will also save updated subaccounts)
-            db.session.commit()
-
-        return jsonify({'message': 'Subaccount IDs updated successfully'}), 200
-
-    except Exception as e:
-        # Handle any errors and perform a rollback if necessary
-        db.session.rollback()
-        return jsonify({'error': f'Failed to update subaccount IDs, error: {str(e)}'}), 500
-
         
+
 @app.route('/chart-of-accounts/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_delete_chart_of_accounts(id):
@@ -585,7 +543,200 @@ def update_delete_chart_of_accounts(id):
     elif request.method == 'DELETE':
         db.session.delete(account)
         db.session.commit()
-        return jsonify({'message': 'Chart of Accounts deleted successfully'})
+        return jsonify({'message': 'Chart of Accounts deleted successfully'})        
+        
+        
+        
+@app.route('/payee', methods=['GET', 'POST'])
+@jwt_required()
+def manage_payee_accounts():
+    # Get the current user_id from the JWT (Make sure you're extracting just the id)
+    current_user_data = get_jwt_identity()  # This should return the JWT payload (likely a dictionary)
+    current_user_id = current_user_data.get('id')  # Extract the 'id' specifically
+
+    if request.method == 'GET':
+        # Filter accounts by the current user's ID
+        accounts = Payee.query.filter_by(user_id=current_user_id).all()
+
+        return jsonify([{
+            'id': acc.id,
+            'parent_account': acc.parent_account,
+            'account_name': acc.account_name,
+            'account_type': acc.account_type,
+            'sub_account_details': acc.sub_account_details or []  # Handle None case
+        } for acc in accounts])
+
+    elif request.method == 'POST':
+        data = request.get_json()
+
+        # Ensure required fields are provided
+        if not all(key in data for key in ['parent_account', 'account_name', 'account_type']):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        # Ensure sub_account_details is either None, a dictionary, or a list
+        sub_account_details = data.get('sub_account_details', None)
+        if sub_account_details and not isinstance(sub_account_details, (dict, list)):
+            return jsonify({'error': 'sub_account_details should be a JSON object or list'}), 400
+
+        # If sub_account_details is provided, ensure each subaccount has a unique ID
+        if sub_account_details:
+            next_id = 1  # Start with ID = 1 for the first subaccount
+            
+            for sub_account in sub_account_details:
+                if 'id' not in sub_account or not sub_account['id']:
+                    sub_account['id'] = f"subaccount-{next_id}"  # Assign the next available ID
+                    next_id += 1  # Increment ID for next subaccount
+                else:
+                    # If the ID is already present, ensure it is unique by checking it
+                    if sub_account['id'] == next_id:
+                        next_id += 1  # Avoid duplicate ID if there was an error in the data
+
+        # Create a new account for the current user
+        new_account = Payee(
+            parent_account=data['parent_account'],
+            account_name=data['account_name'],
+            account_type=data['account_type'],
+            sub_account_details=sub_account_details or [],  # Default to empty list if None
+            user_id=current_user_id
+        )
+
+        try:
+            db.session.add(new_account)
+            db.session.commit()
+            return jsonify({'message': 'payee Account created successfully'}), 201
+        except Exception as e:
+            db.session.rollback()  # Rollback on failure
+            return jsonify({'error': f'Failed to create account, error: {str(e)}'}), 400       
+
+@app.route('/payee/<int:id>', methods=['PUT', 'DELETE'])
+@jwt_required()
+def update_delete_payee_accounts(id):
+    account = Payee.query.get_or_404(id)
+    current_user_data = get_jwt_identity()  # Get the JWT identity
+    current_user_id = current_user_data.get('id')  # Extract 'id' from JWT payload
+    current_username = current_user_data.get('username')  # Extract 'username' from JWT payload
+
+    # Ensure that the user is authorized to modify or delete this account by matching the user_id
+    if account.user_id != current_user_id:
+        return jsonify({'error': 'You do not have permission to modify or delete this account'}), 403
+
+    # Optionally, check if the username matches if you want extra protection
+    if account.user.username != current_username:
+        return jsonify({'error': 'You do not have permission to delete this account'}), 403
+
+    if request.method == 'PUT':
+        data = request.get_json()
+
+        # Ensure sub_account_details is either None, a dictionary, or a list
+        sub_account_details = data.get('sub_account_details', None)
+        if sub_account_details and not isinstance(sub_account_details, (dict, list)):
+            return jsonify({'error': 'sub_account_details should be a JSON object or list'}), 400
+
+        # Update account fields with provided data
+        account.parent_account = data.get('parent_account', account.parent_account)
+        account.account_name = data.get('account_name', account.account_name)
+        account.account_type = data.get('account_type', account.account_type)
+        account.sub_account_details = sub_account_details if sub_account_details is not None else account.sub_account_details
+
+        db.session.commit()
+        return jsonify({'message': 'payee Account updated successfully'})
+
+    elif request.method == 'DELETE':
+        db.session.delete(account)
+        db.session.commit()
+        return jsonify({'message': 'payee Account deleted successfully'})
+
+
+
+@app.route('/customer', methods=['GET', 'POST'])
+@jwt_required()
+def manage_customers():
+    # Get the current user_id from the JWT (Make sure you're extracting just the id)
+    current_user_data = get_jwt_identity()
+    current_user_id = current_user_data.get('id')
+
+    if request.method == 'GET':
+        # Filter customers by the current user's ID
+        customers = Customer.query.filter_by(user_id=current_user_id).all()
+
+        return jsonify([{
+            'id': cust.id,
+            'parent_account': cust.parent_account,
+            'account_name': cust.account_name,
+            'account_type': cust.account_type,
+            'sub_account_details': cust.sub_account_details or []  # Handle None case
+        } for cust in customers])
+
+    elif request.method == 'POST':
+        data = request.get_json()
+
+        # Ensure required fields are provided
+        if not all(key in data for key in ['parent_account', 'account_name', 'account_type']):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        # Ensure sub_account_details is either None, a dictionary, or a list
+        sub_account_details = data.get('sub_account_details', None)
+        if sub_account_details and not isinstance(sub_account_details, (dict, list)):
+            return jsonify({'error': 'sub_account_details should be a JSON object or list'}), 400
+
+        # If sub_account_details is provided, ensure each subaccount has a unique ID
+        if sub_account_details:
+            next_id = 1  # Start with ID = 1 for the first subaccount
+            
+            for sub_account in sub_account_details:
+                if 'id' not in sub_account or not sub_account['id']:
+                    sub_account['id'] = f"subaccount-{next_id}"  # Assign the next available ID
+                    next_id += 1  # Increment ID for next subaccount
+                else:
+                    # If the ID is already present, ensure it is unique by checking it
+                    if sub_account['id'] == next_id:
+                        next_id += 1  # Avoid duplicate ID if there was an error in the data
+
+        # Create a new customer for the current user
+        new_customer = Customer(
+            parent_account=data['parent_account'],
+            account_name=data['account_name'],
+            account_type=data['account_type'],
+            sub_account_details=sub_account_details or [],  # Default to empty list if None
+            user_id=current_user_id
+        )
+
+        try:
+            db.session.add(new_customer)
+            db.session.commit()
+            return jsonify({'message': 'Customer created successfully'}), 201
+        except Exception as e:
+            db.session.rollback()  # Rollback on failure
+            return jsonify({'error': f'Failed to create customer, error: {str(e)}'}), 400
+
+@app.route('/customer/<int:id>', methods=['PUT', 'DELETE'])
+@jwt_required()
+def update_delete_customer(id):
+    customer = Customer.query.get_or_404(id)
+    current_user_data = get_jwt_identity()  # Get the JWT identity
+    current_user_id = current_user_data.get('id')  # Extract 'id' from JWT payload
+
+    # Ensure that the user is authorized to modify or delete this customer by matching the user_id
+    if customer.user_id != current_user_id:
+        return jsonify({'error': 'You do not have permission to modify or delete this customer'}), 403
+
+    if request.method == 'PUT':
+        data = request.get_json()
+
+        # Update customer fields with provided data
+        customer.parent_account = data.get('parent_account', customer.parent_account)
+        customer.account_name = data.get('account_name', customer.account_name)
+        customer.account_type = data.get('account_type', customer.account_type)
+        customer.sub_account_details = data.get('sub_account_details', customer.sub_account_details)
+
+        db.session.commit()
+        return jsonify({'message': 'Customer updated successfully'})
+
+    elif request.method == 'DELETE':
+        db.session.delete(customer)  # Delete the customer
+        db.session.commit()
+        return jsonify({'message': 'Customer deleted successfully'})
+
 @app.route('/invoices', methods=['GET', 'POST'])
 @jwt_required()
 def manage_invoices():
@@ -605,17 +756,11 @@ def manage_invoices():
                 'id': inv.id,
                 'invoice_number': inv.invoice_number,
                 'date_issued': inv.date_issued.isoformat() if inv.date_issued else None,
-                'account_type': inv.account_type,
                 'amount': inv.amount,
                 'username': inv.user.username,  # Access username from related User model
-                'account_class': inv.account_class,
                 'account_debited': inv.account_debited,
                 'account_credited': inv.account_credited,
                 'description': inv.description,
-                'grn_number': inv.grn_number,
-                'parent_account': inv.parent_account,
-                'sub_accounts': inv.sub_accounts,
-                'invoice_type': inv.invoice_type  # Include invoice_type in response
             } for inv in invoices]), 200
 
         elif request.method == 'POST':
@@ -634,7 +779,6 @@ def manage_invoices():
             except ValueError:
                 return jsonify({'error': 'Invalid date format for date_issued. Use ISO format (YYYY-MM-DD)'}), 400
 
-            sub_accounts = data.get('sub_accounts', {})
 
             # Check for uniqueness of invoice_number per user
             existing_invoice = InvoiceIssued.query.filter_by(user_id=user_id, invoice_number=data['invoice_number']).first()
@@ -645,17 +789,11 @@ def manage_invoices():
             new_invoice = InvoiceIssued(
                 invoice_number=data['invoice_number'],
                 date_issued=date_issued,
-                account_type=data['account_type'],
                 amount=float(data['amount']),
-                account_class=data['account_class'],
                 account_debited=data.get('account_debited'),
                 account_credited=data.get('account_credited'),
                 description=data.get('description'),
-                grn_number=data.get('grn_number'),
                 user_id=user_id,  # Use the user_id from the current_user
-                parent_account=data['parent_account'],
-                sub_accounts=sub_accounts,
-                invoice_type=data['invoice_type']  # Make sure invoice_type is passed as part of the data
             )
 
             db.session.add(new_invoice)
@@ -666,7 +804,9 @@ def manage_invoices():
     except Exception as e:
         app.logger.error(f"Error managing invoices: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
-
+    
+    
+    
 @app.route('/invoices/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_delete_invoice(id):
@@ -683,11 +823,7 @@ def update_delete_invoice(id):
             data = request.get_json()
 
             # Ensure 'sub_accounts' is provided and is a valid JSON object
-            if 'sub_accounts' in data:
-                sub_accounts = data['sub_accounts']
-                if not isinstance(sub_accounts, dict):
-                    return jsonify({'error': 'sub_accounts must be a valid JSON object.'}), 400
-                invoice.sub_accounts = sub_accounts
+          
 
             # Ensure 'invoice_type' is provided and valid (if needed)
             if 'invoice_type' in data:
@@ -708,13 +844,10 @@ def update_delete_invoice(id):
                     return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
             # Update other fields (optional fields)
-            invoice.account_type = data.get('account_type', invoice.account_type)
             invoice.amount = float(data.get('amount', invoice.amount))
-            invoice.account_class = data.get('account_class', invoice.account_class)
             invoice.account_debited = data.get('account_debited', invoice.account_debited)
             invoice.account_credited = data.get('account_credited', invoice.account_credited)
-            invoice.grn_number = data.get('grn_number', invoice.grn_number)  # Update GRN number if provided
-            invoice.parent_account = data.get('parent_account', invoice.parent_account)  # Update parent_account if provided
+
 
             db.session.commit()
             return jsonify({'message': 'Invoice updated successfully'}), 200
@@ -727,6 +860,166 @@ def update_delete_invoice(id):
     except Exception as e:
         app.logger.error(f"Error processing invoice {id}: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
+
+# Combined GET and POST for /invoice-received
+@app.route('/invoice-received', methods=['GET', 'POST'])
+@jwt_required()
+def handle_invoices():
+    current_user = get_jwt_identity()
+
+    if not isinstance(current_user, dict) or 'id' not in current_user:
+        return jsonify({"error": "Invalid JWT payload"}), 400
+
+    user_id = current_user['id']
+
+    if request.method == 'GET':
+        # Fetch invoices for the current user
+        invoices = InvoiceReceived.query.filter_by(user_id=user_id).all()
+        return jsonify([{
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "date_issued": invoice.date_issued.isoformat() if invoice.date_issued else None,
+            "description": invoice.description,
+            "amount": invoice.amount,
+            "account_debited": invoice.account_debited,
+            "account_credited": invoice.account_credited,
+            "grn_number": invoice.grn_number,
+        } for invoice in invoices]), 200
+
+    elif request.method == 'POST':
+        # Create a new invoice
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        try:
+            new_invoice = InvoiceReceived(
+                invoice_number=data['invoice_number'],
+                date_issued=datetime.strptime(data['date_issued'], '%Y-%m-%d').date(),
+                description=data.get('description'),
+                amount=data['amount'],
+                user_id=user_id,  # Use the user_id from the current_user
+                account_debited=data.get('account_debited'),
+                account_credited=data.get('account_credited'),
+                grn_number=data.get('grn_number'),
+            )
+            db.session.add(new_invoice)
+            db.session.commit()
+            return jsonify({"message": "Invoice created successfully", "id": new_invoice.id}), 201
+        except KeyError as e:
+            return jsonify({"error": f"Missing required field: {str(e)}"}), 400
+        except ValueError as e:
+            return jsonify({"error": f"Invalid date format: {str(e)}"}), 400
+        except RuntimeError as e:
+            db.session.rollback()
+            return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+# Get a single invoice by ID
+@app.route('/invoice-received/<int:invoice_id>', methods=['GET'])
+@jwt_required()
+def get_invoice(invoice_id):
+    current_user = get_jwt_identity()
+
+    if not isinstance(current_user, dict) or 'id' not in current_user:
+        return jsonify({"error": "Invalid JWT payload"}), 400
+
+    user_id = current_user['id']
+
+    invoice = InvoiceReceived.query.filter_by(id=invoice_id, user_id=user_id).first()
+    if not invoice:
+        return jsonify({"error": "Invoice not found or unauthorized access"}), 404
+
+    return jsonify({
+        "id": invoice.id,
+        "invoice_number": invoice.invoice_number,
+        "date_issued": invoice.date_issued.isoformat(),
+        "description": invoice.description,
+        "amount": invoice.amount,
+        "account_debited": invoice.account_debited,
+        "account_credited": invoice.account_credited,
+        "grn_number": invoice.grn_number,
+    }), 200
+
+# Update an invoice
+@app.route('/invoice-received/<int:invoice_id>', methods=['PUT'])
+@jwt_required()
+def update_invoice(invoice_id):
+    current_user = get_jwt_identity()
+
+    if not isinstance(current_user, dict) or 'id' not in current_user:
+        return jsonify({"error": "Invalid JWT payload"}), 400
+
+    user_id = current_user['id']
+
+    invoice = InvoiceReceived.query.filter_by(id=invoice_id, user_id=user_id).first()
+    if not invoice:
+        return jsonify({"error": "Invoice not found or unauthorized access"}), 404
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    try:
+        if 'invoice_number' in data:
+            # Ensure invoice number is unique for the user
+            existing_invoice = InvoiceReceived.query.filter_by(
+                invoice_number=data['invoice_number'],
+                user_id=user_id
+            ).first()
+            if existing_invoice and existing_invoice.id != invoice_id:
+                return jsonify({"error": "Invoice number already exists"}), 400
+            invoice.invoice_number = data['invoice_number']
+
+        if 'date_issued' in data:
+            invoice.date_issued = datetime.strptime(data['date_issued'], '%Y-%m-%d').date()
+
+        if 'description' in data:
+            invoice.description = data['description']
+
+        if 'amount' in data:
+            invoice.amount = data['amount']
+
+        if 'account_debited' in data:
+            invoice.account_debited = data['account_debited']
+
+        if 'account_credited' in data:
+            invoice.account_credited = data['account_credited']
+
+        if 'grn_number' in data:
+            invoice.grn_number = data['grn_number']
+
+      
+        db.session.commit()
+        return jsonify({"message": "Invoice updated successfully"}), 200
+    except ValueError as e:
+        return jsonify({"error": f"Invalid date format: {str(e)}"}), 400
+    except RuntimeError as e:
+        db.session.rollback()
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+# Delete an invoice
+@app.route('/invoice-received/<int:invoice_id>', methods=['DELETE'])
+@jwt_required()
+def delete_invoice(invoice_id):
+    current_user = get_jwt_identity()
+
+    if not isinstance(current_user, dict) or 'id' not in current_user:
+        return jsonify({"error": "Invalid JWT payload"}), 400
+
+    user_id = current_user['id']
+
+    invoice = InvoiceReceived.query.filter_by(id=invoice_id, user_id=user_id).first()
+    if not invoice:
+        return jsonify({"error": "Invoice not found or unauthorized access"}), 404
+
+    try:
+        db.session.delete(invoice)
+        db.session.commit()
+        return jsonify({"message": "Invoice deleted successfully"}), 200
+    except RuntimeError as e:
+        db.session.rollback()
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
 
 @app.route('/cash-receipt-journals', methods=['GET', 'POST'])
 @jwt_required()
@@ -1027,14 +1320,10 @@ def update_delete_cash_disbursement_journals(id):
         journal.p_voucher_no = data.get('p_voucher_no', journal.p_voucher_no)
         journal.to_whom_paid = data.get('to_whom_paid', journal.to_whom_paid)
         journal.description = data.get('description', journal.description)
-        journal.account_class = data.get('account_class', journal.account_class)
-        journal.account_type = data.get('account_type', journal.account_type)
         journal.payment_type = data.get('payment_type', journal.payment_type)
         journal.cashbook = data.get('cashbook', journal.cashbook)
         journal.account_credited = account_credited
         journal.account_debited = account_debited
-        journal.parent_account = data.get('parent_account', journal.parent_account)
-        journal.sub_accounts = sub_accounts
         journal.cash = float(data.get('cash', journal.cash))
         journal.bank = float(data.get('bank', journal.bank))
         journal.total = journal.cash + journal.bank
@@ -1074,13 +1363,9 @@ def get_user_transactions():
             'invoice_number': invoice.invoice_number,
             'date_issued': invoice.date_issued.strftime('%Y-%m-%d'),
             'amount': invoice.amount,
-            'account_class': invoice.account_class,
-            'account_type': invoice.account_type,
             'account_debited': invoice.account_debited,
             'account_credited': invoice.account_credited,
-            'grn_number': invoice.grn_number,
             'parent_account': invoice.parent_account,
-            'sub_accounts': invoice.sub_accounts  # Assuming it's stored as JSON
         } for invoice in invoices],
         
         'cash_receipts': [{
@@ -1089,15 +1374,11 @@ def get_user_transactions():
             'receipt_no': receipt.receipt_no,
             'from_whom_received': receipt.from_whom_received,
             'description': receipt.description,
-            'account_class': receipt.account_class,
-            'account_type': receipt.account_type,
             'receipt_type': receipt.receipt_type,
             'account_debited': receipt.account_debited,
             'account_credited': receipt.account_credited,
             'cash': receipt.cash,
             'total': receipt.total,
-            'parent_account': receipt.parent_account,
-            'sub_accounts': receipt.sub_accounts  # Assuming it's stored as JSON
         } for receipt in cash_receipts],
         
         'cash_disbursements': [{
@@ -1107,15 +1388,13 @@ def get_user_transactions():
             'to_whom_paid': disbursement.to_whom_paid,
             'payment_type': disbursement.payment_type,
             'description': disbursement.description,
-            'account_class': disbursement.account_class,
-            'account_type': disbursement.account_type,
+           
             'account_debited': disbursement.account_debited,
             'account_credited': disbursement.account_credited,
             'cash': disbursement.cash,
             'bank': disbursement.bank,
             'total': disbursement.total,
-            'parent_account': disbursement.parent_account,
-            'sub_accounts': disbursement.sub_accounts  # Assuming it's stored as JSON
+            
         } for disbursement in cash_disbursements]
     }
 
@@ -1162,7 +1441,7 @@ def get_member_info(username):
     if not member:
         return jsonify({"error": "Member not found"}), 404
 
-    return jsonify({
+    return jsonify({  # Assuming it's stored as JSON
         "member_info": {
             "username": member.username,
             "email": member.email,
@@ -2296,9 +2575,10 @@ def get_debited_credited_accounts():
                 "receipt_no": receipt.receipt_no,
                 "date": receipt.receipt_date,
                 "from_whom_received": receipt.from_whom_received,
-                "account_class": receipt.account_class,
-                "account_type": receipt.account_type,
+               
                 "total_amount": receipt.total,
+                'cashbook': receipt.cashbook,  # Include cashbook in the response
+                'description': receipt.description,
                 "account_debited": receipt.account_debited,
                 "account_credited": receipt.account_credited,
                 'parent_account': receipt.parent_account,
@@ -2317,11 +2597,11 @@ def get_debited_credited_accounts():
                 "cheque_no": disbursement.cheque_no,
                 "date": disbursement.disbursement_date,
                 "to_whom_paid": disbursement.to_whom_paid,
-                "account_class": disbursement.account_class,
-                "account_type": disbursement.account_type,
+                
                 "total_amount": disbursement.total,
+                'cashbook': disbursement.cashbook,  # Include cashbook in the response
+                'description': disbursement.description,
                 "account_debited": disbursement.account_debited,
-                'parent_account': disbursement.parent_account,
                 "account_credited": disbursement.account_credited,
                 "bank": disbursement.bank,
                 "cash": disbursement.cash,
@@ -2340,13 +2620,11 @@ def get_debited_credited_accounts():
                 'type': 'Invoice',
                 'invoice_number': invoice.invoice_number,
                 'date_issued': invoice.date_issued,
-                "account_class": invoice.account_class,
-                "account_type": invoice.account_type,
-                'parent_account': invoice.parent_account,
+                'description': invoice.description,
                 'total_amount': invoice.amount,
                 'account_debited': invoice.account_debited,
                 'account_credited': invoice.account_credited,
-                'grn_number': invoice.grn_number,
+                'invoice_type': invoice.invoice_type,  # Include invoice_type in response
                 'created_by': invoice.user.username if invoice.user else None,
             }
 
