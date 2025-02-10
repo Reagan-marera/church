@@ -106,6 +106,14 @@ class User(db.Model):
     def __repr__(self):
         return f'<User {self.username} - {self.role}>'
 
+# Example Model to store transaction data
+class Transaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    credited_account_name = db.Column(db.String(100), nullable=False)
+    debited_account_name = db.Column(db.String(100), nullable=False)
+    amount_credited = db.Column(db.Float, nullable=False)
+    amount_debited = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String(200))
 
 # ChartOfAccounts Model
 class ChartOfAccounts(db.Model):
@@ -128,6 +136,7 @@ class ChartOfAccounts(db.Model):
 class Payee(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     parent_account = db.Column(db.String(150), nullable=False)
+    
     account_name = db.Column(db.String(100), nullable=False)
     account_type = db.Column(db.String(50), nullable=False)  # E.g., Asset, Liability, Equity
     sub_account_details = db.Column(db.JSON, nullable=True)  # Storing subaccounts as JSON
@@ -143,6 +152,8 @@ class Payee(db.Model):
 # Customer Model
 class Customer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=True)  # Ensure this field exists
+    balance = db.Column(db.Float, default=0.0)  # Track customer balance
     parent_account = db.Column(db.String(150), nullable=False)
     account_name = db.Column(db.String(100), nullable=False)
     account_type = db.Column(db.String(50), nullable=False)  # E.g., Asset, Liability, Equity
@@ -156,7 +167,6 @@ class Customer(db.Model):
         return f'<Customer {self.parent_account} - {self.account_name}>'
 
 
-# InvoiceIssued Model
 class InvoiceIssued(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     invoice_number = db.Column(db.String(50), nullable=False)
@@ -164,11 +174,10 @@ class InvoiceIssued(db.Model):
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
-    coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
-    chart_of_account = db.relationship('ChartOfAccounts', backref=db.backref('invoices_issued', lazy=True))
     user = db.relationship('User', back_populates='invoices_issued')
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
+    name = db.Column(db.String(50), nullable=True)
 
     # Add composite unique constraint on user_id and invoice_number
     __table_args__ = (
@@ -184,6 +193,8 @@ class InvoiceReceived(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     invoice_number = db.Column(db.String(50), nullable=False)
     date_issued = db.Column(db.Date, nullable=False)
+    name = db.Column(db.String(50), nullable=True)
+  
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
@@ -207,21 +218,20 @@ class InvoiceReceived(db.Model):
 class CashReceiptJournal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     receipt_date = db.Column(db.Date, nullable=False)
-    receipt_no = db.Column(db.String(50), nullable=False)  # Remove unique constraint
+    receipt_no = db.Column(db.String(50), nullable=False)
     ref_no = db.Column(db.String(50), nullable=True)
-    from_whom_received = db.Column(db.String(255), nullable=False)
+    from_whom_received = db.Column(db.String(255), nullable=True)
     description = db.Column(db.String(255), nullable=True)
-    receipt_type = db.Column(db.String(50), nullable=False)
+    receipt_type = db.Column(db.String(50), nullable=False)  # Add receipt_type
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
-    bank = db.Column(db.String(100), nullable=True)  # Nullable for bank field
+    bank = db.Column(db.String(100), nullable=True)
     cash = db.Column(db.Float, nullable=True)
     total = db.Column(db.Float, nullable=False)
-    cashbook = db.Column(db.String(250), nullable=False) 
+    cashbook = db.Column(db.String(250), nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_by_user = db.relationship('User', back_populates='cash_receipts')
-    sub_accounts = db.Column(db.JSON, nullable=True)  # Store sub-accounts as a JSON field
-    
+    name = db.Column(db.String(50), nullable=True)
     __table_args__ = (
         UniqueConstraint('created_by', 'receipt_no', name='unique_receipt_per_user'),
     )
@@ -246,10 +256,10 @@ class CashDisbursementJournal(db.Model):
     disbursement_date = db.Column(db.Date, nullable=False)
     cheque_no = db.Column(db.String(50), nullable=False)  # Removed unique constraint
     p_voucher_no = db.Column(db.String(50), nullable=True)
+    name = db.Column(db.String(50), nullable=True)
     to_whom_paid = db.Column(db.String(100), nullable=False)
     payment_type = db.Column(db.String(255), nullable=True)
     description = db.Column(db.String(255), nullable=True)
-    account_type = db.Column(db.String(50), nullable=False)
     account_credited = db.Column(db.String(100), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
     cashbook = db.Column(db.String(250), nullable=False) 
