@@ -16,7 +16,7 @@ import json
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func,or_
 from sqlalchemy.orm.exc import NoResultFound
-
+from collections import defaultdict
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///financial_reporting.db'  
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -3153,6 +3153,7 @@ def update_subaccount_details():
     return jsonify({'message': 'Subaccounts updated successfully'})
 
 
+
 @app.route('/submit-transaction', methods=['POST'])
 def submit_transaction():
     try:
@@ -3165,10 +3166,17 @@ def submit_transaction():
         amount_credited = data.get('amountCredited')
         amount_debited = data.get('amountDebited')
         description = data.get('description')
+        date_issued = data.get('dateIssued')  # Extract date_issued from the request
 
         # Optional: Basic validation
-        if not credited_account or not debited_account or not amount_credited or not amount_debited:
+        if not credited_account or not debited_account or not amount_credited or not amount_debited or not date_issued:
             return jsonify({"error": "Missing required fields"}), 400
+
+        # Convert date_issued to a datetime object
+        try:
+            date_issued = datetime.strptime(date_issued, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
 
         # Save transaction to the database
         new_transaction = Transaction(
@@ -3176,7 +3184,8 @@ def submit_transaction():
             debited_account_name=debited_account,
             amount_credited=amount_credited,
             amount_debited=amount_debited,
-            description=description
+            description=description,
+            date_issued=date_issued  # Include date_issued
         )
         db.session.add(new_transaction)
         db.session.commit()
@@ -3187,43 +3196,7 @@ def submit_transaction():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def resolve_account_type(account_name):
-    app.logger.info(f"Looking for account type for {account_name}")
-    account = ChartOfAccounts.query.filter_by(account_name=account_name).first()
-    if account:
-        app.logger.info(f"Found ChartOfAccounts: {account}")
-        return 'chart_of_accounts'
-    account = Payee.query.filter_by(account_name=account_name).first()
-    if account:
-        app.logger.info(f"Found Payee: {account}")
-        return 'payee'
-    account = Customer.query.filter_by(account_name=account_name).first()
-    if account:
-        app.logger.info(f"Found Customer: {account}")
-        return 'customer'
-    
-    app.logger.error(f"Account {account_name} not found")
-    return None
 
-
-
-# Helper function to resolve account ID based on account name and type
-def resolve_account_id(account_name, account_type):
-    if account_type == 'chart_of_accounts':
-        account = ChartOfAccounts.query.filter_by(account_name=account_name).first()
-    elif account_type == 'payee':
-        account = Payee.query.filter_by(account_name=account_name).first()
-    elif account_type == 'customer':
-        account = Customer.query.filter_by(account_name=account_name).first()
-    else:
-        return None  # Invalid account type
-    
-    return account.id if account else None
-
-    
-    
-    
-    
 @app.route('/get-transactions', methods=['GET'])
 def get_transactions():
     transactions = Transaction.query.all()
@@ -3234,10 +3207,13 @@ def get_transactions():
             "debited_account_name": txn.debited_account_name,
             "amount_credited": txn.amount_credited,
             "amount_debited": txn.amount_debited,
-            "description": txn.description
+            "description": txn.description,
+            "date_issued": txn.date_issued.isoformat() if txn.date_issued else None  # Include date_issued
         } for txn in transactions
     ]
     return jsonify({"transactions": transaction_list})
+
+
 @app.route('/update-transaction/<int:id>', methods=['PUT'])
 def update_transaction(id):
     try:
@@ -3250,18 +3226,29 @@ def update_transaction(id):
         amount_credited = float(data['amountCredited']) if data['amountCredited'] else 0
         amount_debited = float(data['amountDebited']) if data['amountDebited'] else 0
 
+        # Convert date_issued to a datetime object if provided
+        date_issued = data.get('dateIssued')
+        if date_issued:
+            try:
+                date_issued = datetime.strptime(date_issued, '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
         # Update transaction fields with the data from the request
         transaction.credited_account_name = data['creditedAccount']
         transaction.debited_account_name = data['debitedAccount']
         transaction.amount_credited = amount_credited
         transaction.amount_debited = amount_debited
         transaction.description = data['description']
+        if date_issued:
+            transaction.date_issued = date_issued  # Update date_issued if provided
         db.session.commit()
 
         return jsonify({"message": "Transaction updated successfully!"}), 200
     except Exception as e:
         app.logger.error(f"Error updating transaction: {e}")
         return jsonify({"message": "Failed to update transaction"}), 500
+
 
 @app.route('/delete-transaction/<int:id>', methods=['DELETE'])
 def delete_transaction(id):
@@ -3277,6 +3264,171 @@ def delete_transaction(id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+
+@app.route('/api/transactions', methods=['GET'])
+def get_transaction():
+    """
+    Retrieve all transactions from Cash Receipts, Cash Disbursements, and the Transaction model,
+    filter transactions based on account codes less than 1099,
+    and group them by account codes to calculate the closing balance.
+    
+    Returns:
+        JSON: A dictionary containing the filtered transactions and the grouped account balances.
+    """
+    # Initialize a list to store all transactions
+    transactions = []
+
+    # Initialize a dictionary to store account balances
+    account_balances = defaultdict(lambda: {"debits": 0.0, "credits": 0.0})
+
+    # Helper function to check if an account code is less than 1099
+    def is_account_code_less_than_1099(account_code):
+        try:
+            account_code_int = int(account_code.split("-")[0].strip())  # Extract numeric part
+            return account_code_int < 1099
+        except (ValueError, TypeError, IndexError):
+            return False
+
+    # Fetch data from CashReceiptJournal
+    cash_receipts = CashReceiptJournal.query.all()
+    for receipt in cash_receipts:
+        # Check if the debited account is less than 1099
+        if is_account_code_less_than_1099(receipt.account_debited):
+            # Add transaction to the list
+            transactions.append({
+                "transaction_type": "Cash Receipt",
+                "date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+                "receipt_no": receipt.receipt_no,
+                "ref_no": receipt.ref_no,
+                "from_whom_received": receipt.from_whom_received,
+                "description": receipt.description,
+                "receipt_type": receipt.receipt_type,
+                "account_debited": receipt.account_debited,
+                "account_credited": receipt.account_credited,
+                "bank": receipt.bank,
+                "cash": receipt.cash,
+                "total": receipt.total,
+                "cashbook": receipt.cashbook,
+                "created_by": receipt.created_by,
+                "name": receipt.name,
+            })
+
+            # Update account balances
+            account_balances[receipt.account_debited]["debits"] += receipt.total
+            account_balances[receipt.account_credited]["credits"] += receipt.total
+
+    # Fetch data from CashDisbursementJournal
+    cash_disbursements = CashDisbursementJournal.query.all()
+    for disbursement in cash_disbursements:
+        # Check if the credited account is less than 1099
+        if is_account_code_less_than_1099(disbursement.account_credited):
+            # Add transaction to the list
+            transactions.append({
+                "transaction_type": "Cash Disbursement",
+                "date": disbursement.disbursement_date.isoformat() if disbursement.disbursement_date else None,
+                "cheque_no": disbursement.cheque_no,
+                "p_voucher_no": disbursement.p_voucher_no,
+                "name": disbursement.name,
+                "to_whom_paid": disbursement.to_whom_paid,
+                "payment_type": disbursement.payment_type,
+                "description": disbursement.description,
+                "account_credited": disbursement.account_credited,
+                "account_debited": disbursement.account_debited,
+                "cashbook": disbursement.cashbook,
+                "cash": disbursement.cash,
+                "bank": disbursement.bank,
+                "total": disbursement.total,
+                "created_by": disbursement.created_by,
+            })
+
+            # Update account balances
+            account_balances[disbursement.account_debited]["debits"] += disbursement.total
+            account_balances[disbursement.account_credited]["credits"] += disbursement.total
+
+    # Fetch data from the Transaction model
+    db_transactions = Transaction.query.all()
+    for transaction in db_transactions:
+        # Check if the debited or credited account is less than 1099
+        if is_account_code_less_than_1099(transaction.debited_account_name) or is_account_code_less_than_1099(transaction.credited_account_name):
+            # Add transaction to the list
+            transactions.append({
+                "transaction_type": "Transaction",
+                "date": transaction.date_issued.isoformat() if transaction.date_issued else None,
+                "description": transaction.description,
+                "account_debited": transaction.debited_account_name,
+                "account_credited": transaction.credited_account_name,
+                "amount_debited": transaction.amount_debited,
+                "amount_credited": transaction.amount_credited,
+                "created_by": "Transaction Model",  # Placeholder, adjust as needed
+            })
+
+            # Update account balances
+            account_balances[transaction.debited_account_name]["debits"] += transaction.amount_debited
+            account_balances[transaction.credited_account_name]["credits"] += transaction.amount_credited
+
+    # Calculate the closing balance for each account
+    grouped_accounts = []
+    for account_code, balances in account_balances.items():
+        if is_account_code_less_than_1099(account_code):
+            closing_balance = balances["credits"] - balances["debits"]
+            grouped_accounts.append({
+                "account_code": account_code,
+                "total_debits": balances["debits"],
+                "total_credits": balances["credits"],
+                "closing_balance": closing_balance
+            })
+
+    # Return both the filtered transactions and the grouped account balances
+    return jsonify({
+        "transactions": transactions,
+        "filtered_grouped_accounts": grouped_accounts
+    })
+
+
+def get_account_details(account_name):
+    """
+    Fetch account details based on account name.
+    
+    Args:
+        account_name (str): The name of the account.
+    
+    Returns:
+        dict: Account details, or None if the account is not found.
+    """
+    if not account_name:
+        return None
+
+    # Check ChartOfAccounts
+    account = ChartOfAccounts.query.filter_by(account_name=account_name).first()
+    if account:
+        return {
+            "account_name": account.account_name,
+            "account_type": account.account_type,
+            "parent_account": account.parent_account
+        }
+    
+    # Check Payee
+    account = Payee.query.filter_by(account_name=account_name).first()
+    if account:
+        return {
+            "account_name": account.account_name,
+            "account_type": account.account_type,
+            "parent_account": account.parent_account
+        }
+    
+    # Check Customer
+    account = Customer.query.filter_by(account_name=account_name).first()
+    if account:
+        return {
+            "account_name": account.account_name,
+            "account_type": account.account_type,
+            "parent_account": account.parent_account
+        }
+    
+    return None
 
 
 if __name__ == '__main__':

@@ -114,6 +114,8 @@ class Transaction(db.Model):
     amount_credited = db.Column(db.Float, nullable=False)
     amount_debited = db.Column(db.Float, nullable=False)
     description = db.Column(db.String(200))
+    date_issued = db.Column(db.Date, nullable=False)
+
 
 # ChartOfAccounts Model
 class ChartOfAccounts(db.Model):
