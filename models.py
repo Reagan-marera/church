@@ -89,7 +89,7 @@ class User(db.Model):
     
     # Relationship with Church (a user can belong to one church)
     church = db.relationship('Church', back_populates='members')
-    
+ 
     # Password methods
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -124,15 +124,19 @@ class ChartOfAccounts(db.Model):
     account_name = db.Column(db.String(100), nullable=False)
     account_type = db.Column(db.String(50), nullable=False)  # E.g., Asset, Liability, Equity
     sub_account_details = db.Column(db.JSON, nullable=True)  # Storing subaccounts as JSON
-    
+    note_number = db.Column(db.String(50), nullable=True)  # New field for note number
+
     # Foreign key to link to User
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     user = db.relationship('User', backref=db.backref('chart_of_accounts', lazy=True))
     invoices_received = db.relationship('InvoiceReceived', back_populates='chart_of_account')
 
+    # Foreign key to link to a parent account (self-referential relationship)
+    parent_account_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
+    parent_account_rel = db.relationship('ChartOfAccounts', remote_side=[id], backref=db.backref('sub_accounts', lazy=True))
+
     def __repr__(self):
         return f'<ChartOfAccounts {self.parent_account} - {self.account_name}>'
-
 
 # Payee Model
 class Payee(db.Model):
