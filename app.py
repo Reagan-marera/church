@@ -3283,8 +3283,8 @@ def delete_transaction(id):
 
 
 
-
 @app.route('/api/transactions', methods=['GET'])
+@jwt_required()
 def get_transaction():
     """
     Retrieve all transactions from Cash Receipts, Cash Disbursements, and the Transaction model,
@@ -3294,6 +3294,9 @@ def get_transaction():
     Returns:
         JSON: A dictionary containing the filtered transactions and the grouped account balances.
     """
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     # Initialize a list to store all transactions
     transactions = []
 
@@ -3307,61 +3310,39 @@ def get_transaction():
             return account_code_int < 1099
         except (ValueError, TypeError, IndexError):
             return False
-        
-        
-    
+
+    # Fetch data from CashReceiptJournal and CashDisbursementJournal
+    def fetch_transactions_from_model(model, transaction_type):
+        data = model.query.all()  # Optimize with filtering in queries for larger datasets
+        for transaction in data:
+            # Use None if receipt_date or disbursement_date is missing
+            date = transaction.receipt_date if hasattr(transaction, 'receipt_date') else transaction.disbursement_date
+            date = date.isoformat() if date else None
+            
+            transactions.append({
+                "transaction_type": transaction_type,
+                "date": date,
+                "receipt_no": getattr(transaction, 'receipt_no', getattr(transaction, 'cheque_no', None)),
+                "ref_no": getattr(transaction, 'ref_no', getattr(transaction, 'p_voucher_no', None)),
+                "from_whom_received": getattr(transaction, 'from_whom_received', getattr(transaction, 'to_whom_paid', None)),
+                "description": transaction.description,
+                "account_debited": transaction.account_debited,
+                "account_credited": transaction.account_credited,
+                "cashbook": getattr(transaction, 'cashbook', None),
+                "cash": getattr(transaction, 'cash', None),
+                "total": getattr(transaction, 'total', None),
+                "bank": getattr(transaction, 'bank', None),
+                "created_by": transaction.created_by,
+                "name": getattr(transaction, 'name', None),
+            })
+            account_balances[transaction.account_debited]["debits"] += getattr(transaction, 'total', 0)
+            account_balances[transaction.account_credited]["credits"] += getattr(transaction, 'total', 0)
 
     # Fetch data from CashReceiptJournal
-    cash_receipts = CashReceiptJournal.query.all()
-    for receipt in cash_receipts:
-        # Add all cash receipts to the list (no filtering by account code)
-        transactions.append({
-            "transaction_type": "Cash Receipt",
-            "date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
-            "receipt_no": receipt.receipt_no,
-            "ref_no": receipt.ref_no,
-            "from_whom_received": receipt.from_whom_received,
-            "description": receipt.description,
-            "receipt_type": receipt.receipt_type,
-            "account_debited": receipt.account_debited,
-            "account_credited": receipt.account_credited,
-            "bank": receipt.bank,
-            "cash": receipt.cash,
-            "total": receipt.total,
-            "cashbook": receipt.cashbook,
-            "created_by": receipt.created_by,
-            "name": receipt.name,
-        })
-
-        # Update account balances for cash receipts
-        account_balances[receipt.account_debited]["debits"] += receipt.total  # Debit the debited account
-        account_balances[receipt.account_credited]["credits"] += receipt.total  # Credit the credited account
-
+    fetch_transactions_from_model(CashReceiptJournal, "Cash Receipt")
+    
     # Fetch data from CashDisbursementJournal
-    cash_disbursements = CashDisbursementJournal.query.all()
-    for disbursement in cash_disbursements:
-        # Add all cash disbursements to the list (no filtering by account code)
-        transactions.append({
-            "transaction_type": "Cash Disbursement",
-            "date": disbursement.disbursement_date.isoformat() if disbursement.disbursement_date else None,
-            "cheque_no": disbursement.cheque_no,
-            "p_voucher_no": disbursement.p_voucher_no,
-            "name": disbursement.name,
-            "to_whom_paid": disbursement.to_whom_paid,
-            "payment_type": disbursement.payment_type,
-            "description": disbursement.description,
-            "account_credited": disbursement.account_credited,
-            "account_debited": disbursement.account_debited,
-            "cashbook": disbursement.cashbook,
-            "cash": disbursement.cash,
-            "bank": disbursement.bank,
-            "total": disbursement.total,
-            "created_by": disbursement.created_by,
-        })
-
-        # Update account balances for cash disbursements
-        account_balances[disbursement.account_debited]["debits"] += disbursement.total  # Debit the debited account
-        account_balances[disbursement.account_credited]["credits"] += disbursement.total  # Credit the credited account
+    fetch_transactions_from_model(CashDisbursementJournal, "Cash Disbursement")
 
     # Fetch data from the Transaction model
     db_transactions = Transaction.query.all()
@@ -3375,8 +3356,8 @@ def get_transaction():
         credited_account_valid = is_account_code_less_than_1099(transaction.credited_account_name)
 
         # Determine amounts to display
-        amount_debited = transaction.amount_debited if debited_account_valid else "Account code exceeds 1099"
-        amount_credited = transaction.amount_credited if credited_account_valid else "Account code exceeds 1099"
+        amount_debited = transaction.amount_debited if debited_account_valid else 0
+        amount_credited = transaction.amount_credited if credited_account_valid else 0
 
         # Add transaction to the list
         transactions.append({
@@ -3415,279 +3396,16 @@ def get_transaction():
     })
 
 
-def get_account_details(account_name):
-    """
-    Fetch account details based on account name.
-    
-    Args:
-        account_name (str): The name of the account.
-    
-    Returns:
-        dict: Account details, or None if the account is not found.
-    """
-    if not account_name:
-        return None
-
-    # Check ChartOfAccounts
-    account = ChartOfAccounts.query.filter_by(account_name=account_name).first()
-    if account:
-        return {
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "parent_account": account.parent_account
-        }
-    
-    # Check Payee
-    account = Payee.query.filter_by(account_name=account_name).first()
-    if account:
-        return {
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "parent_account": account.parent_account
-        }
-    
-    # Check Customer
-    account = Customer.query.filter_by(account_name=account_name).first()
-    if account:
-        return {
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "parent_account": account.parent_account
-        }
-    
-    return None
 
 @app.route('/revenuetransactions', methods=['GET'])
+@jwt_required()
 def get_all_revenue():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     # Helper function to extract the numeric part of the account_credited field
-    def extract_account_code(account_credited):
-        if account_credited and '-' in account_credited:
-            try:
-                return int(account_credited.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_credited}")
-                return None
-        print(f"Invalid account_credited format: {account_credited}")
-        return None
-
-    # Helper function to get parent account from ChartOfAccounts
-    def get_parent_account(account_code):
-        if account_code:
-            # Extract the numeric code from the account_credited (e.g., "4405" from "4405- Sale of Books")
-            account_code_str = str(account_code)
-
-            # Search for matching ChartOfAccounts where the sub_account_details contains the account code
-            account = ChartOfAccounts.query.all()
-
-            for acc in account:
-                for subaccount in acc.sub_account_details:
-                    # Check if the account_code is in the subaccount's name
-                    if account_code_str in subaccount.get('name', ''):
-                        return acc.parent_account
-            return None
-        return None
-
-
-
-
-
-
-    # Fetch all cash receipt transactions where receipt_type is "Cash"
-    cash_receipts = CashReceiptJournal.query.filter(
-        CashReceiptJournal.receipt_type == "Cash"
-    ).all()
-
-    # Filter cash receipts based on the account_credited range (4000 to 5000)
-    cash_receipts_filtered = [
-        cr for cr in cash_receipts
-        if extract_account_code(cr.account_credited) and 4000 <= extract_account_code(cr.account_credited) <= 5000
-    ]
-
-    # Prepare cash receipts data (excluding account_debited)
-    cash_receipts_data = [{
-        'id': cr.id,
-        'receipt_date': cr.receipt_date.isoformat(),
-        'receipt_no': cr.receipt_no,
-        'ref_no': cr.ref_no,
-        'from_whom_received': cr.from_whom_received,
-        'description': cr.description,
-        'receipt_type': cr.receipt_type,
-        'account_credited': cr.account_credited,  # Only include credited account
-        'parent_account': get_parent_account(extract_account_code(cr.account_credited)),  # Add parent account
-        'bank': cr.bank,
-        'cash': cr.cash,
-        'total': cr.total,
-        'cashbook': cr.cashbook,
-        'created_by': cr.created_by,
-        'name': cr.name
-    } for cr in cash_receipts_filtered]
-
-    # Fetch all invoice issued transactions
-    invoices_issued = InvoiceIssued.query.all()
-
-    # Filter invoices issued based on the account_credited range (4000 to 5000)
-    invoices_issued_filtered = [
-        inv for inv in invoices_issued
-        if extract_account_code(inv.account_credited) and 4000 <= extract_account_code(inv.account_credited) <= 5000
-    ]
-
-    # Prepare invoices issued data (excluding account_debited)
-    invoices_issued_data = [{
-        'id': inv.id,
-        'invoice_number': inv.invoice_number,
-        'date_issued': inv.date_issued.isoformat(),
-        'description': inv.description,
-        'amount': inv.amount,
-        'user_id': inv.user_id,
-        'account_credited': inv.account_credited,  # Only include credited account
-        'parent_account': get_parent_account(extract_account_code(inv.account_credited)),  # Add parent account
-        'name': inv.name
-    } for inv in invoices_issued_filtered]
-
-    # Fetch all transactions from the Transaction table
-    transactions = Transaction.query.all()
-
-    # Filter transactions based on the debited_account_name range (4000 to 5000)
-    transactions_filtered = [
-        txn for txn in transactions
-        if (extract_account_code(txn.debited_account_name) and 5000 <= extract_account_code(txn.debited_account_name) <= 5999) or
-           (extract_account_code(txn.credited_account_name) and 5000 <= extract_account_code(txn.credited_account_name) <= 9999)
-    ]
-
-    # Prepare transactions data (excluding debited_account_name)
-    transactions_data = [{
-        'id': txn.id,
-        'debited_account_name': txn.debited_account_name,
-        'amount_debited': txn.amount_debited,
-        'description': txn.description,
-        'date_issued': txn.date_issued.isoformat(),
-        'parent_account': get_parent_account(extract_account_code(txn.debited_account_name))  # Add parent account
-    } for txn in transactions_filtered]
-
-    # Combine all transaction types into a single response
-    response = {
-        'cash_receipts': cash_receipts_data,
-        'invoices_issued': invoices_issued_data,
-        'transactions': transactions_data
-    }
-
-    return jsonify(response)
-
-
-
-@app.route('/expensetransactions', methods=['GET'])
-def get_all_expense():
-    # Helper function to extract the numeric part of the account_debited field
-    def extract_account_code(account_debited):
-        if account_debited and '-' in account_debited:
-            try:
-                return int(account_debited.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_debited}")
-                return None
-        print(f"Invalid account_debited format: {account_debited}")
-        return None
-
-    # Helper function to get parent account from ChartOfAccounts
-    def get_parent_account(account_code):
-        if account_code:
-            account_code_str = str(account_code)
-            account = ChartOfAccounts.query.all()
-            for acc in account:
-                for subaccount in acc.sub_account_details:
-                    if account_code_str in subaccount.get('name', ''):
-                        return acc.parent_account
-            return None
-        return None
-
-    # Fetch all cash disbursement transactions
-    cash_disbursements = CashDisbursementJournal.query.all()
-
-    # Filter cash disbursements based on the account_debited range (5000 to 5999)
-    cash_disbursements_filtered = [
-        cd for cd in cash_disbursements
-        if extract_account_code(cd.account_debited) and 5000 <= extract_account_code(cd.account_debited) <= 9999
-    ]
-
-    # Prepare cash disbursements data
-    cash_disbursements_data = [{
-        'id': cd.id,
-        'disbursement_date': cd.disbursement_date.isoformat(),
-        'cheque_no': cd.cheque_no,
-        'p_voucher_no': cd.p_voucher_no,
-        'to_whom_paid': cd.to_whom_paid,
-        'payment_type': cd.payment_type,
-        'description': cd.description,
-        'account_debited': cd.account_debited,  # Include debited account
-        'parent_account': get_parent_account(extract_account_code(cd.account_debited)),  # Add parent account
-        'cashbook': cd.cashbook,
-        'cash': cd.cash,
-        'bank': cd.bank,
-        'total': cd.total,
-        'created_by': cd.created_by,
-    } for cd in cash_disbursements_filtered]
-
-    # Fetch all invoice received transactions
-    invoices_received = InvoiceReceived.query.all()
-
-    # Filter invoices received based on the account_debited range (5000 to 5999)
-    invoices_received_filtered = [
-        inv for inv in invoices_received
-        if extract_account_code(inv.account_debited) and 5000 <= extract_account_code(inv.account_debited) <= 9999
-    ]
-
-    # Prepare invoices received data
-    invoices_received_data = [{
-        'id': inv.id,
-        'invoice_number': inv.invoice_number,
-        'date_issued': inv.date_issued.isoformat(),
-        'description': inv.description,
-        'amount': inv.amount,
-        'user_id': inv.user_id,
-        'account_debited': inv.account_debited,  # Include debited account
-        'parent_account': get_parent_account(extract_account_code(inv.account_debited)),  # Add parent account
-        'name': inv.name
-    } for inv in invoices_received_filtered]
-
-    # Fetch all transactions from the Transaction table
-    transactions = Transaction.query.all()
-
-    # Filter transactions based on the debited_account_name and credited_account_name range (5000 to 9999)
-    transactions_filtered = [
-        txn for txn in transactions
-        if (extract_account_code(txn.debited_account_name) and 5000 <= extract_account_code(txn.debited_account_name) <= 5999) or
-           (extract_account_code(txn.credited_account_name) and 5000 <= extract_account_code(txn.credited_account_name) <= 9999)
-    ]
-
-    # Prepare transactions data
-    transactions_data = [{
-        'id': txn.id,
-        'debited_account_name': txn.debited_account_name,
-        'credited_account_name': txn.credited_account_name,
-        'amount_debited': txn.amount_debited,
-        'amount_credited': txn.amount_credited,
-        'description': txn.description,
-        'date_issued': txn.date_issued.isoformat(),
-        'parent_account': get_parent_account(
-            extract_account_code(txn.debited_account_name) if txn.debited_account_name else extract_account_code(txn.credited_account_name)
-        ),  # Add parent account based on either debited or credited account
-    } for txn in transactions_filtered]
-
-    # Combine all transaction types into a single response
-    response = {
-        'cash_disbursements': cash_disbursements_data,
-        'invoices_received': invoices_received_data,
-        'transactions': transactions_data
-    }
-
-    return jsonify(response)
-
-
-
-@app.route('/assettransactions', methods=['GET'])
-def get_all_assets():
-    # Helper function to extract the numeric part of the account_debited or account_credited field
     def extract_account_code(account_field):
+        """Helper function to extract the numeric part of the account code."""
         if account_field and '-' in account_field:
             try:
                 return int(account_field.split('-')[0].strip())
@@ -3697,8 +3415,215 @@ def get_all_assets():
         print(f"Invalid account field format: {account_field}")
         return None
 
-    # Helper function to get the parent account from ChartOfAccounts using account code
+    # Helper function to get parent account from ChartOfAccounts
     def get_parent_account(account_code):
+        """Helper function to get the parent account based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            accounts = ChartOfAccounts.query.all()  # Ideally, cache the result to optimize performance.
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        return acc.parent_account
+            return None
+        return None
+
+    # Helper function to fetch filtered data from the database
+    def fetch_filtered_data(model, account_field, account_range):
+        """Helper function to fetch filtered data based on account code range."""
+        data = model.query.all()
+        filtered_data = [
+            item for item in data
+            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
+        ]
+        return filtered_data
+
+    try:
+        # Fetch and filter all Cash Receipts (Revenue-related) where receipt_type is "Cash"
+        cash_receipts_filtered = fetch_filtered_data(CashReceiptJournal, 'account_credited', (4000, 5000))
+        cash_receipts_data = [{
+            'id': cr.id,
+            'receipt_date': cr.receipt_date.isoformat(),
+            'receipt_no': cr.receipt_no,
+            'ref_no': cr.ref_no,
+            'from_whom_received': cr.from_whom_received,
+            'description': cr.description,
+            'receipt_type': cr.receipt_type,
+            'account_credited': cr.account_credited,
+            'parent_account': get_parent_account(extract_account_code(cr.account_credited)),
+            'bank': cr.bank,
+            'cash': cr.cash,
+            'total': cr.total,
+            'cashbook': cr.cashbook,
+            'created_by': cr.created_by,
+            'name': cr.name
+        } for cr in cash_receipts_filtered]
+
+        # Fetch and filter all Invoices Issued (Revenue-related)
+        invoices_issued_filtered = fetch_filtered_data(InvoiceIssued, 'account_credited', (4000, 5000))
+        invoices_issued_data = [{
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'date_issued': inv.date_issued.isoformat(),
+            'description': inv.description,
+            'amount': inv.amount,
+            'user_id': inv.user_id,
+            'account_credited': inv.account_credited,
+            'parent_account': get_parent_account(extract_account_code(inv.account_credited)),
+            'name': inv.name
+        } for inv in invoices_issued_filtered]
+
+        # Fetch and filter all Transactions (Revenue-related)
+        transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (4000, 4999)) + fetch_filtered_data(Transaction, 'credited_account_name', (4000, 4999))
+        transactions_data = [{
+            'id': txn.id,
+            'debited_account_name': txn.debited_account_name,
+            'amount_debited': txn.amount_debited,
+            'description': txn.description,
+            'date_issued': txn.date_issued.isoformat(),
+            'parent_account': get_parent_account(extract_account_code(txn.debited_account_name) if txn.debited_account_name else extract_account_code(txn.credited_account_name)),
+        } for txn in transactions_filtered]
+
+        # Combine all revenue-related transactions into a single response
+        response = {
+            'cash_receipts': cash_receipts_data,
+            'invoices_issued': invoices_issued_data,
+            'transactions': transactions_data
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        # Handle any potential errors and return a meaningful response
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+@app.route('/expensetransactions', methods=['GET'])
+@jwt_required()
+
+def get_all_expense():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    def extract_account_code(account_field):
+        """Helper function to extract the numeric part of the account code."""
+        if account_field and '-' in account_field:
+            try:
+                return int(account_field.split('-')[0].strip())
+            except ValueError:
+                print(f"Failed to extract account code from: {account_field}")
+                return None
+        print(f"Invalid account field format: {account_field}")
+        return None
+
+    def get_parent_account(account_code):
+        """Helper function to get the parent account based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            accounts = ChartOfAccounts.query.all()  # Ideally, this should be cached or optimized.
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        return acc.parent_account
+            return None
+        return None
+
+    def fetch_filtered_data(model, account_field, account_range):
+        """Helper function to fetch filtered data based on account code range."""
+        data = model.query.all()
+        filtered_data = [
+            item for item in data
+            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
+        ]
+        return filtered_data
+
+    try:
+        # Fetch and filter all Cash Disbursements (Expense-related) - Pulling only account_debited
+        cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (5000, 5999))
+        cash_disbursements_data = [{
+            'id': cd.id,
+            'disbursement_date': cd.disbursement_date.isoformat(),
+            'cheque_no': cd.cheque_no,
+            'p_voucher_no': cd.p_voucher_no,
+            'to_whom_paid': cd.to_whom_paid,
+            'payment_type': cd.payment_type,
+            'description': cd.description,
+            'account_debited': cd.account_debited,
+            'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
+            'cashbook': cd.cashbook,
+            'cash': cd.cash,
+            'bank': cd.bank,
+            'total': cd.total,
+            'created_by': cd.created_by,
+        } for cd in cash_disbursements_filtered]
+
+        # Fetch and filter all Invoices Received (Expense-related) - Pulling only account_debited
+        invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (5000, 5999))
+        invoices_received_data = [{
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'date_issued': inv.date_issued.isoformat(),
+            'description': inv.description,
+            'amount': inv.amount,
+            'user_id': inv.user_id,
+            'account_debited': inv.account_debited,
+            'parent_account': get_parent_account(extract_account_code(inv.account_debited)),
+            'name': inv.name
+        } for inv in invoices_received_filtered]
+
+        # Fetch and filter all Transactions (Expense-related) - Pulling both debited and credited accounts
+        transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (5000, 5999)) + fetch_filtered_data(Transaction, 'credited_account_name', (5000, 5999))
+        transactions_data = [{
+            'id': txn.id,
+            'debited_account_name': txn.debited_account_name,
+            'credited_account_name': txn.credited_account_name,
+            'amount_debited': txn.amount_debited,
+            'amount_credited': txn.amount_credited,
+            'description': txn.description,
+            'date_issued': txn.date_issued.isoformat(),
+            'parent_account': get_parent_account(
+                extract_account_code(txn.debited_account_name) if txn.debited_account_name else extract_account_code(txn.credited_account_name)
+            ),
+        } for txn in transactions_filtered]
+
+        # Combine all expense-related transactions into a single response
+        response = {
+            'cash_disbursements': cash_disbursements_data,
+            'invoices_received': invoices_received_data,
+            'transactions': transactions_data
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        # Handle any potential errors and return a meaningful response
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+@app.route('/assettransactions', methods=['GET'])
+@jwt_required()
+
+def get_all_assets():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    def extract_account_code(account_field):
+        """Helper function to extract numeric part of the account code."""
+        if account_field and '-' in account_field:
+            try:
+                return int(account_field.split('-')[0].strip())
+            except ValueError:
+                print(f"Failed to extract account code from: {account_field}")
+                return None
+        print(f"Invalid account field format: {account_field}")
+        return None
+
+    def get_parent_account(account_code):
+        """Helper function to get the parent account based on account code."""
         if account_code:
             account_code_str = str(account_code)
             accounts = ChartOfAccounts.query.all()
@@ -3709,135 +3634,131 @@ def get_all_assets():
             return ''  # Return empty string if no parent account is found
         return ''
 
-    # Fetch all Cash Disbursements (Asset-related) - Pulling only account_debited
-    cash_disbursements = CashDisbursementJournal.query.all()
-    cash_disbursements_filtered = [
-        cd for cd in cash_disbursements
-        if (extract_account_code(cd.account_debited) and 1100 <= extract_account_code(cd.account_debited) <= 1999)
-    ]
-    cash_disbursements_data = [{
-        'id': cd.id,
-        'disbursement_date': cd.disbursement_date.isoformat(),
-        'cheque_no': cd.cheque_no,
-        'p_voucher_no': cd.p_voucher_no,
-        'to_whom_paid': cd.to_whom_paid,
-        'payment_type': cd.payment_type,
-        'description': cd.description,
-        'account_debited': cd.account_debited,
-        'account_credited': cd.account_credited,
-        'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
-        'cashbook': cd.cashbook,
-        'cash': cd.cash,
-        'bank': cd.bank,
-        'total': cd.total,
-        'created_by': cd.created_by,
-    } for cd in cash_disbursements_filtered]
+    def fetch_filtered_data(model, account_field, account_range):
+        """Helper function to fetch filtered data based on account code range."""
+        data = model.query.all()
+        filtered_data = [
+            item for item in data
+            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
+        ]
+        return filtered_data
 
-    # Fetch all Invoices Received (Asset-related) - Pulling only account_debited
-    invoices_received = InvoiceReceived.query.all()
-    invoices_received_filtered = [
-        inv for inv in invoices_received
-        if (extract_account_code(inv.account_debited) and 1100 <= extract_account_code(inv.account_debited) <= 1999) or
-           (extract_account_code(inv.account_credited) and 1100 <= extract_account_code(inv.account_credited) <= 1999)
-    ]
-    invoices_received_data = [{
-        'id': inv.id,
-        'invoice_number': inv.invoice_number,
-        'date_issued': inv.date_issued.isoformat(),
-        'description': inv.description,
-        'amount': inv.amount,
-        'user_id': inv.user_id,
-        'account_debited': inv.account_debited,
-        'account_credited': inv.account_credited,
-        'parent_account': get_parent_account(extract_account_code(inv.account_debited)),
-        'name': inv.name
-    } for inv in invoices_received_filtered]
+    try:
+        # Fetch and filter all Cash Disbursements (Asset-related) - Pulling only account_debited
+        cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (1100, 1999))
+        cash_disbursements_data = [{
+            'id': cd.id,
+            'disbursement_date': cd.disbursement_date.isoformat(),
+            'cheque_no': cd.cheque_no,
+            'p_voucher_no': cd.p_voucher_no,
+            'to_whom_paid': cd.to_whom_paid,
+            'payment_type': cd.payment_type,
+            'description': cd.description,
+            'account_debited': cd.account_debited,
+            'account_credited': cd.account_credited,
+            'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
+            'cashbook': cd.cashbook,
+            'cash': cd.cash,
+            'bank': cd.bank,
+            'total': cd.total,
+            'created_by': cd.created_by,
+        } for cd in cash_disbursements_filtered]
 
-    # Fetch all Invoices Issued (Asset-related) - Pulling both account_debited and account_credited within the range
-    invoices_issued = InvoiceIssued.query.all()
-    invoices_issued_filtered = [
-        inv for inv in invoices_issued
-        if (extract_account_code(inv.account_debited) and 1100 <= extract_account_code(inv.account_debited) <= 1999) or
-           (extract_account_code(inv.account_credited) and 1100 <= extract_account_code(inv.account_credited) <= 1999)
-    ]
-    invoices_issued_data = [{
-        'id': inv.id,
-        'invoice_number': inv.invoice_number,
-        'date_issued': inv.date_issued.isoformat(),
-        'description': inv.description,
-        'amount': inv.amount,
-        'user_id': inv.user_id,
-        'account_debited': inv.account_debited,
-        'account_credited': inv.account_credited,
-        'parent_account': get_parent_account(
-            extract_account_code(inv.account_debited) if extract_account_code(inv.account_debited) and 1100 <= extract_account_code(inv.account_debited) <= 1999
-            else extract_account_code(inv.account_credited)
-        ),
-        'name': inv.name
-    } for inv in invoices_issued_filtered]
+        # Fetch and filter all Invoices Received (Asset-related) - Pulling only account_debited or account_credited
+        invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (1100, 1999)) + fetch_filtered_data(InvoiceReceived, 'account_credited', (1100, 1999))
+        invoices_received_data = [{
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'date_issued': inv.date_issued.isoformat(),
+            'description': inv.description,
+            'amount': inv.amount,
+            'user_id': inv.user_id,
+            'account_debited': inv.account_debited,
+            'account_credited': inv.account_credited,
+            'parent_account': get_parent_account(extract_account_code(inv.account_debited)),
+            'name': inv.name
+        } for inv in invoices_received_filtered]
 
-    # Fetch all Cash Receipt Journals (Asset-related) - Pulling only account_credited
-    cash_receipts = CashReceiptJournal.query.all()
-    cash_receipts_filtered = [
-        cr for cr in cash_receipts
-        if (extract_account_code(cr.account_credited) and 1100 <= extract_account_code(cr.account_credited) <= 1999)
-    ]
-    cash_receipts_data = [{
-        'id': cr.id,
-        'receipt_date': cr.receipt_date.isoformat(),
-        'receipt_no': cr.receipt_no,
-        'ref_no': cr.ref_no,
-        'from_whom_received': cr.from_whom_received,
-        'description': cr.description,
-        'receipt_type': cr.receipt_type,
-        'account_credited': cr.account_credited,
-        'account_debited': cr.account_debited,
-        'bank': cr.bank,
-        'cash': cr.cash,
-        'total': cr.total,
-        'cashbook': cr.cashbook,
-        'created_by': cr.created_by,
-        'name': cr.name,
-        'parent_account': get_parent_account(extract_account_code(cr.account_credited)),
-    } for cr in cash_receipts_filtered]
+        # Fetch and filter all Invoices Issued (Asset-related) - Pulling both account_debited and account_credited
+        invoices_issued_filtered = fetch_filtered_data(InvoiceIssued, 'account_debited', (1100, 1999)) + fetch_filtered_data(InvoiceIssued, 'account_credited', (1100, 1999))
+        invoices_issued_data = [{
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'date_issued': inv.date_issued.isoformat(),
+            'description': inv.description,
+            'amount': inv.amount,
+            'user_id': inv.user_id,
+            'account_debited': inv.account_debited,
+            'account_credited': inv.account_credited,
+            'parent_account': get_parent_account(
+                extract_account_code(inv.account_debited) if extract_account_code(inv.account_debited) and 1100 <= extract_account_code(inv.account_debited) <= 1999
+                else extract_account_code(inv.account_credited)
+            ),
+            'name': inv.name
+        } for inv in invoices_issued_filtered]
 
-    # Fetch all Transactions (Asset-related) - Pulling both debited and credited accounts within the range
-    transactions = Transaction.query.all()
-    transactions_filtered = [
-        txn for txn in transactions
-        if (extract_account_code(txn.debited_account_name) and 1100 <= extract_account_code(txn.debited_account_name) <= 1999) or
-           (extract_account_code(txn.credited_account_name) and 1100 <= extract_account_code(txn.credited_account_name) <= 1999)
-    ]
-    transactions_data = [{
-        'id': txn.id,
-        'debited_account_name': txn.debited_account_name,
-        'credited_account_name': txn.credited_account_name,
-        'amount_debited': txn.amount_debited,
-        'amount_credited': txn.amount_credited,
-        'description': txn.description,
-        'date_issued': txn.date_issued.isoformat(),
-        'parent_account': get_parent_account(
-            extract_account_code(txn.debited_account_name) if extract_account_code(txn.debited_account_name) and 1100 <= extract_account_code(txn.debited_account_name) <= 1999
-            else extract_account_code(txn.credited_account_name)
-        ),
-    } for txn in transactions_filtered]
+        # Fetch and filter all Cash Receipt Journals (Asset-related) - Pulling only account_credited
+        cash_receipts_filtered = fetch_filtered_data(CashReceiptJournal, 'account_credited', (1100, 1999))
+        cash_receipts_data = [{
+            'id': cr.id,
+            'receipt_date': cr.receipt_date.isoformat(),
+            'receipt_no': cr.receipt_no,
+            'ref_no': cr.ref_no,
+            'from_whom_received': cr.from_whom_received,
+            'description': cr.description,
+            'receipt_type': cr.receipt_type,
+            'account_credited': cr.account_credited,
+            'account_debited': cr.account_debited,
+            'bank': cr.bank,
+            'cash': cr.cash,
+            'total': cr.total,
+            'cashbook': cr.cashbook,
+            'created_by': cr.created_by,
+            'name': cr.name,
+            'parent_account': get_parent_account(extract_account_code(cr.account_credited)),
+        } for cr in cash_receipts_filtered]
 
-    # Combine all asset-related transactions into a single response
-    response = {
-        'cash_disbursements': cash_disbursements_data,
-        'invoices_received': invoices_received_data,
-        'invoices_issued': invoices_issued_data,
-        'cash_receipts': cash_receipts_data,
-        'transactions': transactions_data
-    }
+        # Fetch and filter all Transactions (Asset-related) - Pulling both debited and credited accounts
+        transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (1100, 1999)) + fetch_filtered_data(Transaction, 'credited_account_name', (1100, 1999))
+        transactions_data = [{
+            'id': txn.id,
+            'debited_account_name': txn.debited_account_name,
+            'credited_account_name': txn.credited_account_name,
+            'amount_debited': txn.amount_debited,
+            'amount_credited': txn.amount_credited,
+            'description': txn.description,
+            'date_issued': txn.date_issued.isoformat(),
+            'parent_account': get_parent_account(
+                extract_account_code(txn.debited_account_name) if extract_account_code(txn.debited_account_name) and 1100 <= extract_account_code(txn.debited_account_name) <= 1999
+                else extract_account_code(txn.credited_account_name)
+            ),
+        } for txn in transactions_filtered]
 
-    return jsonify(response)
+        # Combine all asset-related transactions into a single response
+        response = {
+            'cash_disbursements': cash_disbursements_data,
+            'invoices_received': invoices_received_data,
+            'invoices_issued': invoices_issued_data,
+            'cash_receipts': cash_receipts_data,
+            'transactions': transactions_data
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        # Handle any potential errors and return a meaningful response
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/liabilitytransactions', methods=['GET'])
+@jwt_required()
+
 def get_all_liabilities():
-    # Helper function to extract the numeric part of the account_debited or account_credited field
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     def extract_account_code(account_field):
+        """Helper function to extract numeric part of the account code."""
         if account_field and '-' in account_field:
             try:
                 return int(account_field.split('-')[0].strip())
@@ -3847,8 +3768,8 @@ def get_all_liabilities():
         print(f"Invalid account field format: {account_field}")
         return None
 
-    # Helper function to get the parent account from ChartOfAccounts using account code
     def get_parent_account(account_code):
+        """Helper function to get the parent account based on account code."""
         if account_code:
             account_code_str = str(account_code)
             account = ChartOfAccounts.query.all()
@@ -3859,118 +3780,121 @@ def get_all_liabilities():
             return None
         return None
 
-    # Fetch all Cash Disbursements (Liability-related) - Pulling only account_debited
-    cash_disbursements = CashDisbursementJournal.query.all()
-    cash_disbursements_filtered = [
-        cd for cd in cash_disbursements
-        if (extract_account_code(cd.account_debited) and 2000 <= extract_account_code(cd.account_debited) <= 2999)
-    ]
-    cash_disbursements_data = [{
-        'id': cd.id,
-        'disbursement_date': cd.disbursement_date.isoformat(),
-        'cheque_no': cd.cheque_no,
-        'p_voucher_no': cd.p_voucher_no,
-        'to_whom_paid': cd.to_whom_paid,
-        'payment_type': cd.payment_type,
-        'description': cd.description,
-        'account_debited': cd.account_debited,
-        'account_credited': cd.account_credited,
+    def fetch_filtered_data(model, account_field, account_range):
+        """Helper function to fetch filtered data based on account code range."""
+        data = model.query.all()
+        filtered_data = [
+            item for item in data
+            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
+        ]
+        return filtered_data
 
-        'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
-        'cashbook': cd.cashbook,
-        'cash': cd.cash,
-        'bank': cd.bank,
-        'total': cd.total,
-        'created_by': cd.created_by,
-    } for cd in cash_disbursements_filtered]
+    try:
+        # Fetch and filter all Cash Disbursements (Liability-related) - Pulling only account_debited
+        cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (2000, 2999))
+        cash_disbursements_data = [{
+            'id': cd.id,
+            'disbursement_date': cd.disbursement_date.isoformat(),
+            'cheque_no': cd.cheque_no,
+            'p_voucher_no': cd.p_voucher_no,
+            'to_whom_paid': cd.to_whom_paid,
+            'payment_type': cd.payment_type,
+            'description': cd.description,
+            'account_debited': cd.account_debited,
+            'account_credited': cd.account_credited,
+            'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
+            'cashbook': cd.cashbook,
+            'cash': cd.cash,
+            'bank': cd.bank,
+            'total': cd.total,
+            'created_by': cd.created_by,
+        } for cd in cash_disbursements_filtered]
 
-    # Fetch all Invoices Received (Liability-related) - Pulling only account_credited
-    invoices_received = InvoiceReceived.query.all()
-    invoices_received_filtered = [
-        inv for inv in invoices_received
-        if (extract_account_code(inv.account_credited) and 2000 <= extract_account_code(inv.account_credited) <= 2999)
-    ]
-    invoices_received_data = [{
-        'id': inv.id,
-        'invoice_number': inv.invoice_number,
-        'date_issued': inv.date_issued.isoformat(),
-        'description': inv.description,
-        'amount': inv.amount,
-        'user_id': inv.user_id,
-        'account_credited': inv.account_credited,
-        'parent_account': get_parent_account(extract_account_code(inv.account_credited)),
-        'name': inv.name
-    } for inv in invoices_received_filtered]
+        # Fetch and filter all Invoices Received (Liability-related) - Pulling only account_credited
+        invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_credited', (2000, 2999))
+        invoices_received_data = [{
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'date_issued': inv.date_issued.isoformat(),
+            'description': inv.description,
+            'amount': inv.amount,
+            'user_id': inv.user_id,
+            'account_credited': inv.account_credited,
+            'parent_account': get_parent_account(extract_account_code(inv.account_credited)),
+            'name': inv.name
+        } for inv in invoices_received_filtered]
 
-    # Fetch all Cash Receipt Journals (Liability-related) - Pulling only account_credited
-    cash_receipts = CashReceiptJournal.query.all()
-    cash_receipts_filtered = [
-        cr for cr in cash_receipts
-        if (extract_account_code(cr.account_credited) and 2000 <= extract_account_code(cr.account_credited) <= 2999)
-    ]
-    cash_receipts_data = [{
-        'id': cr.id,
-        'receipt_date': cr.receipt_date.isoformat(),
-        'receipt_no': cr.receipt_no,
-        'ref_no': cr.ref_no,
-        'from_whom_received': cr.from_whom_received,
-        'description': cr.description,
-        'receipt_type': cr.receipt_type,
-        'account_credited': cr.account_credited,
-        'account_debited': cr.account_credited,
-        'bank': cr.bank,
-        'cash': cr.cash,
-        'total': cr.total,
-        'cashbook': cr.cashbook,
-        'created_by': cr.created_by,
-        'name': cr.name,
-        'parent_account': get_parent_account(extract_account_code(cr.account_credited)),
-    } for cr in cash_receipts_filtered]
+        # Fetch and filter all Cash Receipt Journals (Liability-related) - Pulling only account_credited
+        cash_receipts_filtered = fetch_filtered_data(CashReceiptJournal, 'account_credited', (2000, 2999))
+        cash_receipts_data = [{
+            'id': cr.id,
+            'receipt_date': cr.receipt_date.isoformat(),
+            'receipt_no': cr.receipt_no,
+            'ref_no': cr.ref_no,
+            'from_whom_received': cr.from_whom_received,
+            'description': cr.description,
+            'receipt_type': cr.receipt_type,
+            'account_credited': cr.account_credited,
+            'account_debited': cr.account_credited,
+            'bank': cr.bank,
+            'cash': cr.cash,
+            'total': cr.total,
+            'cashbook': cr.cashbook,
+            'created_by': cr.created_by,
+            'name': cr.name,
+            'parent_account': get_parent_account(extract_account_code(cr.account_credited)),
+        } for cr in cash_receipts_filtered]
 
-    transactions = Transaction.query.all()
-    transactions_filtered = []
+        # Fetch and filter all Transactions (Liability-related)
+        transactions = Transaction.query.all()
+        transactions_filtered = []
 
-    for txn in transactions:
-        debited_code = extract_account_code(txn.debited_account_name)
-        credited_code = extract_account_code(txn.credited_account_name)
+        for txn in transactions:
+            debited_code = extract_account_code(txn.debited_account_name)
+            credited_code = extract_account_code(txn.credited_account_name)
 
-        # Check if either debited or credited account falls within the range
-        if (debited_code and 2000 <= debited_code <= 2999) or (credited_code and 2000 <= credited_code <= 2999):
-            # Determine which account falls within the range
-            if debited_code and 2000 <= debited_code <= 2999:
-                # Use debited account and ignore credited account
-                transactions_filtered.append({
-                    'id': txn.id,
-                    'account_name': txn.debited_account_name,
-                    'amount': txn.amount_debited,  # Use debited amount
-                    'description': txn.description,
-                    'date_issued': txn.date_issued.isoformat(),
-                    'parent_account': get_parent_account(debited_code),
-                })
-            elif credited_code and 2000 <= credited_code <= 2999:
-                # Use credited account and ignore debited account
-                transactions_filtered.append({
-                    'id': txn.id,
-                    'account_name': txn.credited_account_name,
-                    'amount': txn.amount_credited,  # Use credited amount
-                    'description': txn.description,
-                    'date_issued': txn.date_issued.isoformat(),
-                    'parent_account': get_parent_account(credited_code),
-                })
+            if (debited_code and 2000 <= debited_code <= 2999) or (credited_code and 2000 <= credited_code <= 2999):
+                if debited_code and 2000 <= debited_code <= 2999:
+                    transactions_filtered.append({
+                        'id': txn.id,
+                        'account_name': txn.debited_account_name,
+                        'amount': txn.amount_debited,
+                        'description': txn.description,
+                        'date_issued': txn.date_issued.isoformat(),
+                        'parent_account': get_parent_account(debited_code),
+                    })
+                elif credited_code and 2000 <= credited_code <= 2999:
+                    transactions_filtered.append({
+                        'id': txn.id,
+                        'account_name': txn.credited_account_name,
+                        'amount': txn.amount_credited,
+                        'description': txn.description,
+                        'date_issued': txn.date_issued.isoformat(),
+                        'parent_account': get_parent_account(credited_code),
+                    })
 
-    # Combine all liability-related transactions into a single response
-    response = {
-        'cash_disbursements': cash_disbursements_data,
-        'invoices_received': invoices_received_data,
-        'cash_receipts': cash_receipts_data,
-        'transactions': transactions_filtered
-    }
+        # Combine all liability-related transactions into a single response
+        response = {
+            'cash_disbursements': cash_disbursements_data,
+            'invoices_received': invoices_received_data,
+            'cash_receipts': cash_receipts_data,
+            'transactions': transactions_filtered
+        }
 
-    # Return the response as JSON
-    return jsonify(response)
+        # Return the response as JSON
+        return jsonify(response)
+
+    except Exception as e:
+        # Handle any potential errors and return a meaningful response
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/net-assets', methods=['GET'])
+@jwt_required()
+
 def get_net_assets():
-    
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     def extract_account_code(account_field):
         """Extract account code from account field."""
         if account_field and '-' in account_field:
@@ -3983,11 +3907,11 @@ def get_net_assets():
         return None
 
     # Helper function to get the parent account from ChartOfAccounts using account code
-    def get_parent_account(account_code):
+    def get_parent_account(account_code, accounts):
         """Get the parent account based on account code."""
         if account_code:
             account_code_str = str(account_code)
-            accounts = ChartOfAccounts.query.all()
+            # Loop through the preloaded accounts for parent account lookup
             for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
@@ -4004,8 +3928,9 @@ def get_net_assets():
         return False
 
     try:
-        # Fetch all transactions
+        # Fetch all transactions and ChartOfAccounts in one go for efficiency
         transactions = Transaction.query.all()
+        accounts = ChartOfAccounts.query.all()
 
         # Initialize totals
         total_credits = 0.0
@@ -4038,20 +3963,20 @@ def get_net_assets():
 
         # Prepare the response
         response = {
-            'total_credits': total_credits,
-            'total_debits': total_debits,
-            'net_assets': net_assets,
+            'total_credits': round(total_credits, 2),
+            'total_debits': round(total_debits, 2),
+            'net_assets': round(net_assets, 2),
             'transactions': [
                 {
                     'id': txn.id,
                     'credited_account_name': txn.credited_account_name,
                     'debited_account_name': txn.debited_account_name,
-                    'amount_credited': txn.amount_credited if is_account_in_range(txn.credited_account_name) else 0.0,
-                    'amount_debited': txn.amount_debited if is_account_in_range(txn.debited_account_name) else 0.0,
+                    'amount_credited': round(txn.amount_credited, 2) if is_account_in_range(txn.credited_account_name) else 0.0,
+                    'amount_debited': round(txn.amount_debited, 2) if is_account_in_range(txn.debited_account_name) else 0.0,
                     'description': txn.description,
                     'date_issued': txn.date_issued.isoformat() if txn.date_issued else None,
-                    'parent_account_credited': get_parent_account(extract_account_code(txn.credited_account_name)),
-                    'parent_account_debited': get_parent_account(extract_account_code(txn.debited_account_name)),
+                    'parent_account_credited': get_parent_account(extract_account_code(txn.credited_account_name), accounts),
+                    'parent_account_debited': get_parent_account(extract_account_code(txn.debited_account_name), accounts),
                 }
                 for txn in filtered_transactions  # Only include filtered transactions
             ]
@@ -4060,211 +3985,34 @@ def get_net_assets():
         return jsonify(response), 200
 
     except Exception as e:
+        # Log the error for debugging purposes
+        print(f"Error fetching net assets: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-BASE_URL = "http://127.0.0.1:5000"
 
-def fetch_data(endpoint):
-    """Helper function to fetch data from a given endpoint."""
-    try:
-        response = requests.get(f"{BASE_URL}/{endpoint}")
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from {endpoint}: {e}")
-        return None
-
-def create_trial_balance():
-    """Create a trial balance by aggregating data from all endpoints."""
-    # Initialize a dictionary to store account balances
-    account_balances = defaultdict(lambda: {"debits": 0.0, "credits": 0.0})
-
-    # Fetch data from all endpoints
-    endpoints = [
-        "api/transactions",
-        "revenuetransactions",
-        "expensetransactions",
-        "assettransactions",
-        "liabilitytransactions",
-        "net-assets"
-    ]
-
-    for endpoint in endpoints:
-        data = fetch_data(endpoint)
-        if not data:
-            continue
-
-        # Process transactions based on the endpoint
-        if endpoint == "api/transactions":
-            transactions = data.get("transactions", [])
-            for txn in transactions:
-                account_debited = txn.get("account_debited")
-                account_credited = txn.get("account_credited")
-                amount_debited = txn.get("amount_debited", 0)
-                amount_credited = txn.get("amount_credited", 0)
-
-                # Handle non-numeric values
-                try:
-                    amount_debited = float(amount_debited) if isinstance(amount_debited, (int, float, str)) and str(amount_debited).replace('.', '').isdigit() else 0.0
-                except ValueError:
-                    amount_debited = 0.0
-
-                try:
-                    amount_credited = float(amount_credited) if isinstance(amount_credited, (int, float, str)) and str(amount_credited).replace('.', '').isdigit() else 0.0
-                except ValueError:
-                    amount_credited = 0.0
-
-                if account_debited:
-                    account_balances[account_debited]["debits"] += amount_debited
-                if account_credited:
-                    account_balances[account_credited]["credits"] += amount_credited
-
-        elif endpoint == "revenuetransactions":
-            for txn_type in ["cash_receipts", "invoices_issued", "transactions"]:
-                transactions = data.get(txn_type, [])
-                for txn in transactions:
-                    account_credited = txn.get("account_credited")
-                    amount_credited = txn.get("amount", 0)
-
-                    # Handle non-numeric values
-                    try:
-                        amount_credited = float(amount_credited) if isinstance(amount_credited, (int, float, str)) and str(amount_credited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_credited = 0.0
-
-                    if account_credited:
-                        account_balances[account_credited]["credits"] += amount_credited
-
-        elif endpoint == "expensetransactions":
-            for txn_type in ["cash_disbursements", "invoices_received", "transactions"]:
-                transactions = data.get(txn_type, [])
-                for txn in transactions:
-                    account_debited = txn.get("account_debited")
-                    amount_debited = txn.get("amount", 0)
-
-                    # Handle non-numeric values
-                    try:
-                        amount_debited = float(amount_debited) if isinstance(amount_debited, (int, float, str)) and str(amount_debited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_debited = 0.0
-
-                    if account_debited:
-                        account_balances[account_debited]["debits"] += amount_debited
-
-        elif endpoint == "assettransactions":
-            for txn_type in ["cash_disbursements", "invoices_received", "invoices_issued", "cash_receipts", "transactions"]:
-                transactions = data.get(txn_type, [])
-                for txn in transactions:
-                    account_debited = txn.get("account_debited")
-                    account_credited = txn.get("account_credited")
-                    amount_debited = txn.get("amount_debited", 0)
-                    amount_credited = txn.get("amount_credited", 0)
-
-                    # Handle non-numeric values
-                    try:
-                        amount_debited = float(amount_debited) if isinstance(amount_debited, (int, float, str)) and str(amount_debited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_debited = 0.0
-
-                    try:
-                        amount_credited = float(amount_credited) if isinstance(amount_credited, (int, float, str)) and str(amount_credited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_credited = 0.0
-
-                    if account_debited:
-                        account_balances[account_debited]["debits"] += amount_debited
-                    if account_credited:
-                        account_balances[account_credited]["credits"] += amount_credited
-
-        elif endpoint == "liabilitytransactions":
-            for txn_type in ["cash_disbursements", "invoices_received", "cash_receipts", "transactions"]:
-                transactions = data.get(txn_type, [])
-                for txn in transactions:
-                    account_debited = txn.get("account_debited")
-                    account_credited = txn.get("account_credited")
-                    amount_debited = txn.get("amount_debited", 0)
-                    amount_credited = txn.get("amount_credited", 0)
-
-                    # Handle non-numeric values
-                    try:
-                        amount_debited = float(amount_debited) if isinstance(amount_debited, (int, float, str)) and str(amount_debited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_debited = 0.0
-
-                    try:
-                        amount_credited = float(amount_credited) if isinstance(amount_credited, (int, float, str)) and str(amount_credited).replace('.', '').isdigit() else 0.0
-                    except ValueError:
-                        amount_credited = 0.0
-
-                    if account_debited:
-                        account_balances[account_debited]["debits"] += amount_debited
-                    if account_credited:
-                        account_balances[account_credited]["credits"] += amount_credited
-
-        elif endpoint == "net-assets":
-            transactions = data.get("transactions", [])
-            for txn in transactions:
-                account_debited = txn.get("debited_account_name")
-                account_credited = txn.get("credited_account_name")
-                amount_debited = txn.get("amount_debited", 0)
-                amount_credited = txn.get("amount_credited", 0)
-
-                # Handle non-numeric values
-                try:
-                    amount_debited = float(amount_debited) if isinstance(amount_debited, (int, float, str)) and str(amount_debited).replace('.', '').isdigit() else 0.0
-                except ValueError:
-                    amount_debited = 0.0
-
-                try:
-                    amount_credited = float(amount_credited) if isinstance(amount_credited, (int, float, str)) and str(amount_credited).replace('.', '').isdigit() else 0.0
-                except ValueError:
-                    amount_credited = 0.0
-
-                if account_debited:
-                    account_balances[account_debited]["debits"] += amount_debited
-                if account_credited:
-                    account_balances[account_credited]["credits"] += amount_credited
-
-    # Prepare the trial balance
-    trial_balance = []
-    for account, balances in account_balances.items():
-        total_debits = balances["debits"]
-        total_credits = balances["credits"]
-        closing_balance = total_debits - total_credits
-
-        trial_balance.append({
-            "account": account,
-            "total_debits": total_debits,
-            "total_credits": total_credits,
-            "closing_balance": closing_balance
-        })
-
-    return trial_balance
 @app.route('/trial-balance', methods=['GET'])
-def get_trial_balances():
-    """Endpoint to fetch the trial balance."""
-    trial_balance = create_trial_balance()
-    return jsonify(trial_balance)
+@jwt_required()
 
+def get_trials_balance():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
 
-from collections import defaultdict
-
-
-
-@app.route('/transactions/accounts', methods=['GET'])
-def get_accounts_debited_credited():
     # Query all transactions from each model
     invoices_issued = db.session.query(InvoiceIssued).all()
     invoices_received = db.session.query(InvoiceReceived).all()
     cash_receipts = db.session.query(CashReceiptJournal).all()
     cash_disbursements = db.session.query(CashDisbursementJournal).all()
+    transactions = db.session.query(Transaction).all()  # Include the Transaction model
+
+    # Retrieve all accounts once to optimize performance
+    accounts = ChartOfAccounts.query.all()
 
     # Function to get parent account details
     def get_parent_account_details(account_code):
         """Get the parent account details based on account code."""
         if account_code:
             account_code_str = str(account_code)
-            accounts = ChartOfAccounts.query.all()
+            # Cache lookup for account details
             for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
@@ -4279,11 +4027,143 @@ def get_accounts_debited_credited():
         return {}  # Return empty dictionary if no account code is provided
 
     # Combine all transactions into a single list
-    all_transactions = []
-    all_transactions.extend(invoices_issued)
-    all_transactions.extend(invoices_received)
-    all_transactions.extend(cash_receipts)
-    all_transactions.extend(cash_disbursements)
+    all_transactions = (
+        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+    )
+
+    # Group transactions by note number
+    note_groups = defaultdict(lambda: {
+        "parent_account": None,
+        "relevant_accounts": set(),
+        "amounts": [],  # List to store individual amounts
+        "total_debits": 0.0,
+        "total_credits": 0.0,
+        "closing_balance": 0.0  # Placeholder for closing balance
+    })
+
+    for transaction in all_transactions:
+        # Determine the amount and account names based on the transaction type
+        if isinstance(transaction, InvoiceIssued):
+            amount = transaction.amount
+            debited_account = transaction.account_debited  # Correct attribute for InvoiceIssued
+            credited_account = transaction.account_credited  # Correct attribute for InvoiceIssued
+        elif isinstance(transaction, InvoiceReceived):
+            amount = transaction.amount
+            debited_account = transaction.account_debited  # Correct attribute for InvoiceReceived
+            credited_account = transaction.account_credited  # Correct attribute for InvoiceReceived
+        elif isinstance(transaction, CashReceiptJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited  # Correct attribute for CashReceiptJournal
+            credited_account = transaction.account_credited  # Correct attribute for CashReceiptJournal
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited  # Correct attribute for CashDisbursementJournal
+            credited_account = transaction.account_credited  # Correct attribute for CashDisbursementJournal
+        elif isinstance(transaction, Transaction):  # Handle the Transaction model
+            amount = transaction.amount_debited  # Correct logic for `amount_debited`
+            debited_account = transaction.debited_account_name  # Use `debited_account_name`
+            credited_account = transaction.credited_account_name  # Use `credited_account_name`
+        else:
+            continue  # Skip if the amount cannot be determined
+
+        # Get parent account details for debited and credited accounts
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
+
+        # Handle debited account
+        if parent_debited and parent_debited.get("note_number"):
+            note_number = parent_debited.get("note_number")
+            parent_account = parent_debited.get("parent_account")
+            note_groups[note_number]["parent_account"] = parent_account
+            note_groups[note_number]["relevant_accounts"].add(debited_account)
+            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+            note_groups[note_number]["total_debits"] += amount  # Add to total debits
+
+        # Handle credited account
+        if parent_credited and parent_credited.get("note_number"):
+            note_number = parent_credited.get("note_number")
+            parent_account = parent_credited.get("parent_account")
+            note_groups[note_number]["parent_account"] = parent_account
+            note_groups[note_number]["relevant_accounts"].add(credited_account)
+            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+            note_groups[note_number]["total_credits"] += amount  # Add to total credits
+
+    # Calculate the closing balance (debits - credits) for each note
+    for note, data in note_groups.items():
+        data["closing_balance"] = round(data["total_debits"] - data["total_credits"], 2)
+
+    # Convert defaultdict to a regular dictionary for JSON serialization
+    note_groups = {
+        note: {
+            "parent_account": data["parent_account"],
+            "relevant_accounts": list(data["relevant_accounts"]),
+            "amounts": data["amounts"],  # Include individual amounts
+            "total_debits": round(data["total_debits"], 2),  # Round total debits
+            "total_credits": round(data["total_credits"], 2),  # Round total credits
+            "closing_balance": round(data["closing_balance"], 2)  # Round closing balance
+        }
+        for note, data in note_groups.items()
+    }
+
+    # Ensure all notes from 1 to the maximum note number are included, even if empty
+    max_note_number = max(int(note) for note in note_groups.keys()) if note_groups else 0
+    for note in range(1, max_note_number + 1):
+        if str(note) not in note_groups:
+            note_groups[str(note)] = {
+                "parent_account": None,
+                "relevant_accounts": [],
+                "amounts": [],  # Empty list for amounts
+                "total_debits": 0.0,
+                "total_credits": 0.0,
+                "closing_balance": 0.0  # Empty closing balance
+            }
+
+    return jsonify(note_groups)
+
+
+
+
+
+
+@app.route('/transactions/accounts', methods=['GET'])
+@jwt_required()
+
+def get_accounts_debited_credited():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Query all transactions from each model
+    invoices_issued = db.session.query(InvoiceIssued).all()
+    invoices_received = db.session.query(InvoiceReceived).all()
+    cash_receipts = db.session.query(CashReceiptJournal).all()
+    cash_disbursements = db.session.query(CashDisbursementJournal).all()
+    transactions = db.session.query(Transaction).all()  # Include the Transaction model
+
+    # Retrieve all accounts once to optimize performance
+    accounts = ChartOfAccounts.query.all()
+
+    # Function to get parent account details based on account code
+    def get_parent_account_details(account_code):
+        """Get the parent account details based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        # Return detailed account information
+                        return {
+                            "parent_account": acc.parent_account,
+                            "account_name": acc.account_name,
+                            "account_type": acc.account_type,
+                            "note_number": acc.note_number
+                        }
+            return {}  # Return empty dictionary if no parent account is found
+        return {}  # Return empty dictionary if no account code is provided
+
+    # Combine all transactions into a single list
+    all_transactions = (
+        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+    )
 
     # Group transactions by note number
     note_groups = defaultdict(lambda: {
@@ -4294,24 +4174,40 @@ def get_accounts_debited_credited():
     })
 
     for transaction in all_transactions:
-        # Determine the amount based on the transaction type
-        if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
+        # Determine the amount and account names based on the transaction type
+        if isinstance(transaction, InvoiceIssued):
             amount = transaction.amount
-        elif isinstance(transaction, (CashReceiptJournal, CashDisbursementJournal)):
+            debited_account = transaction.account_debited  # Use the correct attribute for InvoiceIssued
+            credited_account = transaction.account_credited  # Use the correct attribute for InvoiceIssued
+        elif isinstance(transaction, InvoiceReceived):
+            amount = transaction.amount
+            debited_account = transaction.account_debited  # Use the correct attribute for InvoiceReceived
+            credited_account = transaction.account_credited  # Use the correct attribute for InvoiceReceived
+        elif isinstance(transaction, CashReceiptJournal):
             amount = transaction.total
+            debited_account = transaction.account_debited  # Use the correct attribute for CashReceiptJournal
+            credited_account = transaction.account_credited  # Use the correct attribute for CashReceiptJournal
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited  # Use the correct attribute for CashDisbursementJournal
+            credited_account = transaction.account_credited  # Use the correct attribute for CashDisbursementJournal
+        elif isinstance(transaction, Transaction):  # Handle the Transaction model
+            amount = transaction.amount_debited  # Use `amount_debited` or `amount_credited` based on your logic
+            debited_account = transaction.debited_account_name  # Use `debited_account_name` for Transaction
+            credited_account = transaction.credited_account_name  # Use `credited_account_name` for Transaction
         else:
             continue  # Skip if the amount cannot be determined
 
         # Get parent account details for debited and credited accounts
-        parent_debited = get_parent_account_details(transaction.account_debited)
-        parent_credited = get_parent_account_details(transaction.account_credited)
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
 
         # Determine the note number and parent account for the debited account
         if parent_debited and parent_debited.get("note_number"):
             note_number = parent_debited.get("note_number")
             parent_account = parent_debited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(transaction.account_debited)
+            note_groups[note_number]["relevant_accounts"].add(debited_account)
             note_groups[note_number]["amounts"].append(amount)  # Add individual amount
             note_groups[note_number]["total_amount"] += amount
 
@@ -4320,7 +4216,7 @@ def get_accounts_debited_credited():
             note_number = parent_credited.get("note_number")
             parent_account = parent_credited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(transaction.account_credited)
+            note_groups[note_number]["relevant_accounts"].add(credited_account)
             note_groups[note_number]["amounts"].append(amount)  # Add individual amount
             note_groups[note_number]["total_amount"] += amount
 
@@ -4330,7 +4226,7 @@ def get_accounts_debited_credited():
             "parent_account": data["parent_account"],
             "relevant_accounts": list(data["relevant_accounts"]),
             "amounts": data["amounts"],  # Include individual amounts
-            "total_amount": data["total_amount"]
+            "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
         for note, data in note_groups.items()
     }
@@ -4348,86 +4244,130 @@ def get_accounts_debited_credited():
 
     return jsonify(note_groups)
 
+
+
+
 @app.route('/income-statement/accounts', methods=['GET'])
+@jwt_required()
+
 def get_income_accounts_debited_credited():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     # Query all transactions from each model
     invoices_issued = db.session.query(InvoiceIssued).all()
     invoices_received = db.session.query(InvoiceReceived).all()
     cash_receipts = db.session.query(CashReceiptJournal).all()
     cash_disbursements = db.session.query(CashDisbursementJournal).all()
+    transactions = db.session.query(Transaction).all()  # Include the Transaction model
 
-    # Function to get parent account details
+    # Retrieve all accounts once to optimize performance
+    all_accounts = ChartOfAccounts.query.all()
+
+    # Function to get parent account details and account names based on account code
     def get_parent_account_details(account_code):
-        """Get the parent account details based on account code."""
+        """Get the parent account details and account names based on account code."""
         if account_code:
             account_code_str = str(account_code)
-            accounts = ChartOfAccounts.query.all()
-            for acc in accounts:
+            for acc in all_accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
-                        # Return detailed account information
+                        # Return detailed account information including account names
                         return {
                             "parent_account": acc.parent_account,
                             "account_name": acc.account_name,
                             "account_type": acc.account_type,
-                            "note_number": acc.note_number
+                            "note_number": acc.note_number,
+                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
                         }
             return {}  # Return empty dictionary if no parent account is found
         return {}  # Return empty dictionary if no account code is provided
 
     # Combine all transactions into a single list
-    all_transactions = []
-    all_transactions.extend(invoices_issued)
-    all_transactions.extend(invoices_received)
-    all_transactions.extend(cash_receipts)
-    all_transactions.extend(cash_disbursements)
+    all_transactions = (
+        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+    )
 
     # Group transactions by note number
     note_groups = defaultdict(lambda: {
         "parent_account": None,
+        "account_names": set(),  # Store account names
         "relevant_accounts": set(),
         "amounts": [],  # List to store individual amounts
         "total_amount": 0.0
     })
 
     for transaction in all_transactions:
-        # Determine the amount based on the transaction type
-        if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
+        # Initialize variables for amount, debited_account, and credited_account
+        amount = 0.0
+        debited_account = None
+        credited_account = None
+
+        # Process different transaction types
+        if isinstance(transaction, InvoiceIssued):
             amount = transaction.amount
-        elif isinstance(transaction, (CashReceiptJournal, CashDisbursementJournal)):
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, InvoiceReceived):
+            amount = transaction.amount
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashReceiptJournal):
             amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, Transaction):
+            amount = transaction.amount_debited
+            debited_account = transaction.debited_account_name
+            credited_account = transaction.credited_account_name
         else:
-            continue  # Skip if the amount cannot be determined
+            continue  # Skip any unsupported transaction type
+
+        # Round amount to two decimal places to avoid floating-point issues
+        amount = round(amount, 2)
 
         # Get parent account details for debited and credited accounts
-        parent_debited = get_parent_account_details(transaction.account_debited)
-        parent_credited = get_parent_account_details(transaction.account_credited)
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
 
-        # Determine the note number and parent account for the debited account
+        # Handle debited account information
         if parent_debited and parent_debited.get("note_number"):
             note_number = parent_debited.get("note_number")
             parent_account = parent_debited.get("parent_account")
+            account_name = parent_debited.get("account_name")
+            sub_account_name = parent_debited.get("sub_account_name")
+
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(transaction.account_debited)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+            note_groups[note_number]["account_names"].add(account_name)  # Add account name
+            note_groups[note_number]["relevant_accounts"].add(debited_account)
+            note_groups[note_number]["amounts"].append(amount)
             note_groups[note_number]["total_amount"] += amount
 
-        # Determine the note number and parent account for the credited account
+        # Handle credited account information
         if parent_credited and parent_credited.get("note_number"):
             note_number = parent_credited.get("note_number")
             parent_account = parent_credited.get("parent_account")
+            account_name = parent_credited.get("account_name")
+            sub_account_name = parent_credited.get("sub_account_name")
+
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(transaction.account_credited)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+            note_groups[note_number]["account_names"].add(account_name)  # Add account name
+            note_groups[note_number]["relevant_accounts"].add(credited_account)
+            note_groups[note_number]["amounts"].append(amount)
             note_groups[note_number]["total_amount"] += amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
     note_groups = {
         note: {
             "parent_account": data["parent_account"],
+            "account_names": list(data["account_names"]),  # Include account names
             "relevant_accounts": list(data["relevant_accounts"]),
             "amounts": data["amounts"],  # Include individual amounts
-            "total_amount": data["total_amount"]
+            "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
         for note, data in note_groups.items()
     }
@@ -4440,6 +4380,141 @@ def get_income_accounts_debited_credited():
         return jsonify({})
 
     return jsonify(note_groups)
+
+
+@app.route('/balance-statement/accounts', methods=['GET'])
+@jwt_required()
+
+def get_balance_accounts_debited_credited():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Query all transactions from each model
+    invoices_issued = db.session.query(InvoiceIssued).all()
+    invoices_received = db.session.query(InvoiceReceived).all()
+    cash_receipts = db.session.query(CashReceiptJournal).all()
+    cash_disbursements = db.session.query(CashDisbursementJournal).all()
+    transactions = db.session.query(Transaction).all()  # Include the Transaction model
+
+    # Retrieve all accounts once to optimize performance
+    all_accounts = ChartOfAccounts.query.all()
+
+    # Function to get parent account details and account names based on account code
+    def get_parent_account_details(account_code):
+        """Get the parent account details and account names based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            for acc in all_accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        # Return detailed account information including account names
+                        return {
+                            "parent_account": acc.parent_account,
+                            "account_name": acc.account_name,
+                            "account_type": acc.account_type,
+                            "note_number": acc.note_number,
+                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
+                        }
+            return {}  # Return empty dictionary if no parent account is found
+        return {}  # Return empty dictionary if no account code is provided
+
+    # Combine all transactions into a single list
+    all_transactions = (
+        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+    )
+
+    # Group transactions by note number
+    note_groups = defaultdict(lambda: {
+        "parent_account": None,
+        "account_names": set(),  # Store account names
+        "relevant_accounts": set(),
+        "amounts": [],  # List to store individual amounts
+        "total_amount": 0.0
+    })
+
+    for transaction in all_transactions:
+        # Initialize variables for amount, debited_account, and credited_account
+        amount = 0.0
+        debited_account = None
+        credited_account = None
+
+        # Process different transaction types
+        if isinstance(transaction, InvoiceIssued):
+            amount = transaction.amount
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, InvoiceReceived):
+            amount = transaction.amount
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashReceiptJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, Transaction):
+            amount = transaction.amount_debited
+            debited_account = transaction.debited_account_name
+            credited_account = transaction.credited_account_name
+        else:
+            continue  # Skip any unsupported transaction type
+
+        # Round amount to two decimal places to avoid floating-point issues
+        amount = round(amount, 2)
+
+        # Get parent account details for debited and credited accounts
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
+
+        # Handle debited account information
+        if parent_debited and parent_debited.get("note_number"):
+            note_number = parent_debited.get("note_number")
+            parent_account = parent_debited.get("parent_account")
+            account_name = parent_debited.get("account_name")
+            sub_account_name = parent_debited.get("sub_account_name")
+
+            note_groups[note_number]["parent_account"] = parent_account
+            note_groups[note_number]["account_names"].add(account_name)  # Add account name
+            note_groups[note_number]["relevant_accounts"].add(debited_account)
+            note_groups[note_number]["amounts"].append(amount)
+            note_groups[note_number]["total_amount"] += amount
+
+        # Handle credited account information
+        if parent_credited and parent_credited.get("note_number"):
+            note_number = parent_credited.get("note_number")
+            parent_account = parent_credited.get("parent_account")
+            account_name = parent_credited.get("account_name")
+
+            note_groups[note_number]["parent_account"] = parent_account
+            note_groups[note_number]["account_names"].add(account_name)  # Add account name
+            note_groups[note_number]["relevant_accounts"].add(credited_account)
+            note_groups[note_number]["amounts"].append(amount)
+            note_groups[note_number]["total_amount"] += amount
+
+    # Convert defaultdict to a regular dictionary for JSON serialization
+    note_groups = {
+        note: {
+            "parent_account": data["parent_account"],
+            "account_names": list(data["account_names"]),  # Include account names
+            "relevant_accounts": list(data["relevant_accounts"]),
+            "amounts": data["amounts"],  # Include individual amounts
+            "total_amount": round(data["total_amount"], 2)  # Round total amount
+        }
+        for note, data in note_groups.items()
+    }
+
+    # **Fix the filtering** to include notes starting from 18 upwards
+    note_groups = {note: data for note, data in note_groups.items() if int(note) >= 18}
+
+    # If no notes starting from 18, return an empty dictionary
+    if not note_groups:
+        return jsonify({})
+
+    return jsonify(note_groups)
+
 
 if __name__ == '__main__':
     app.run(debug=True)
