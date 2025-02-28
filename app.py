@@ -4247,9 +4247,10 @@ def get_accounts_debited_credited():
 
 
 
+from collections import defaultdict
+
 @app.route('/income-statement/accounts', methods=['GET'])
 @jwt_required()
-
 def get_income_accounts_debited_credited():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
@@ -4288,12 +4289,12 @@ def get_income_accounts_debited_credited():
         invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
     )
 
-    # Group transactions by note number
-    note_groups = defaultdict(lambda: {
-        "parent_account": None,
-        "account_names": set(),  # Store account names
-        "relevant_accounts": set(),
+    # Group transactions by account name (e.g., 400-Revenue From Non-Exch Transactions)
+    account_groups = defaultdict(lambda: {
+        "parent_accounts": set(),  # Store parent accounts
+        "relevant_accounts": set(),  # Store relevant sub-accounts
         "amounts": [],  # List to store individual amounts
+        "notes": set(),  # Store note numbers
         "total_amount": 0.0
     })
 
@@ -4334,57 +4335,60 @@ def get_income_accounts_debited_credited():
         parent_debited = get_parent_account_details(debited_account)
         parent_credited = get_parent_account_details(credited_account)
 
-        # Handle debited account information
-        if parent_debited and parent_debited.get("note_number"):
-            note_number = parent_debited.get("note_number")
-            parent_account = parent_debited.get("parent_account")
-            account_name = parent_debited.get("account_name")
-            sub_account_name = parent_debited.get("sub_account_name")
+        # Function to check if the account name is within the range 400-599
+        def is_account_in_range(account_name):
+            """Check if the account name starts with a number between 400 and 599."""
+            if account_name and account_name.split('-')[0].isdigit():
+                account_number = int(account_name.split('-')[0])
+                return 400 <= account_number <= 599
+            return False
 
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["account_names"].add(account_name)  # Add account name
-            note_groups[note_number]["relevant_accounts"].add(debited_account)
-            note_groups[note_number]["amounts"].append(amount)
-            note_groups[note_number]["total_amount"] += amount
+        # Handle debited account information
+        if parent_debited and parent_debited.get("account_name"):
+            account_name = parent_debited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 400-599
+                parent_account = parent_debited.get("parent_account")
+                sub_account_name = parent_debited.get("sub_account_name")
+                note_number = parent_debited.get("note_number")
+
+                account_groups[account_name]["parent_accounts"].add(parent_account)
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["amounts"].append(amount)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
 
         # Handle credited account information
-        if parent_credited and parent_credited.get("note_number"):
-            note_number = parent_credited.get("note_number")
-            parent_account = parent_credited.get("parent_account")
+        if parent_credited and parent_credited.get("account_name"):
             account_name = parent_credited.get("account_name")
-            sub_account_name = parent_credited.get("sub_account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 400-599
+                parent_account = parent_credited.get("parent_account")
+                sub_account_name = parent_credited.get("sub_account_name")
+                note_number = parent_credited.get("note_number")
 
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["account_names"].add(account_name)  # Add account name
-            note_groups[note_number]["relevant_accounts"].add(credited_account)
-            note_groups[note_number]["amounts"].append(amount)
-            note_groups[note_number]["total_amount"] += amount
+                account_groups[account_name]["parent_accounts"].add(parent_account)
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["amounts"].append(amount)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
-    note_groups = {
-        note: {
-            "parent_account": data["parent_account"],
-            "account_names": list(data["account_names"]),  # Include account names
-            "relevant_accounts": list(data["relevant_accounts"]),
+    account_groups = {
+        account_name: {
+            "parent_accounts": list(data["parent_accounts"]),  # Include parent accounts
+            "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
             "amounts": data["amounts"],  # Include individual amounts
+            "notes": list(data["notes"]),  # Include note numbers
             "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
-        for note, data in note_groups.items()
+        for account_name, data in account_groups.items()
     }
 
-    # Filter to include only note numbers from 18 onwards
-    note_groups = {note: data for note, data in note_groups.items() if int(note) >= 18}
+    return jsonify(account_groups)
 
-    # If no notes starting from 18, return an empty dictionary
-    if not note_groups:
-        return jsonify({})
-
-    return jsonify(note_groups)
-
+from collections import defaultdict
 
 @app.route('/balance-statement/accounts', methods=['GET'])
 @jwt_required()
-
 def get_balance_accounts_debited_credited():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
@@ -4423,12 +4427,12 @@ def get_balance_accounts_debited_credited():
         invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
     )
 
-    # Group transactions by note number
-    note_groups = defaultdict(lambda: {
-        "parent_account": None,
-        "account_names": set(),  # Store account names
-        "relevant_accounts": set(),
+    # Group transactions by account name (e.g., 100-Current Assets)
+    account_groups = defaultdict(lambda: {
+        "parent_accounts": set(),  # Store parent accounts
+        "relevant_accounts": set(),  # Store relevant sub-accounts
         "amounts": [],  # List to store individual amounts
+        "notes": set(),  # Store note numbers
         "total_amount": 0.0
     })
 
@@ -4469,51 +4473,55 @@ def get_balance_accounts_debited_credited():
         parent_debited = get_parent_account_details(debited_account)
         parent_credited = get_parent_account_details(credited_account)
 
-        # Handle debited account information
-        if parent_debited and parent_debited.get("note_number"):
-            note_number = parent_debited.get("note_number")
-            parent_account = parent_debited.get("parent_account")
-            account_name = parent_debited.get("account_name")
-            sub_account_name = parent_debited.get("sub_account_name")
+        # Function to check if the account name is within the range 100-399
+        def is_account_in_range(account_name):
+            """Check if the account name starts with a number between 100 and 399."""
+            if account_name and account_name.split('-')[0].isdigit():
+                account_number = int(account_name.split('-')[0])
+                return 100 <= account_number <= 399
+            return False
 
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["account_names"].add(account_name)  # Add account name
-            note_groups[note_number]["relevant_accounts"].add(debited_account)
-            note_groups[note_number]["amounts"].append(amount)
-            note_groups[note_number]["total_amount"] += amount
+        # Handle debited account information
+        if parent_debited and parent_debited.get("account_name"):
+            account_name = parent_debited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 100-399
+                parent_account = parent_debited.get("parent_account")
+                sub_account_name = parent_debited.get("sub_account_name")
+                note_number = parent_debited.get("note_number")
+
+                account_groups[account_name]["parent_accounts"].add(parent_account)
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["amounts"].append(amount)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
 
         # Handle credited account information
-        if parent_credited and parent_credited.get("note_number"):
-            note_number = parent_credited.get("note_number")
-            parent_account = parent_credited.get("parent_account")
+        if parent_credited and parent_credited.get("account_name"):
             account_name = parent_credited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 100-399
+                parent_account = parent_credited.get("parent_account")
+                sub_account_name = parent_credited.get("sub_account_name")
+                note_number = parent_credited.get("note_number")
 
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["account_names"].add(account_name)  # Add account name
-            note_groups[note_number]["relevant_accounts"].add(credited_account)
-            note_groups[note_number]["amounts"].append(amount)
-            note_groups[note_number]["total_amount"] += amount
+                account_groups[account_name]["parent_accounts"].add(parent_account)
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["amounts"].append(amount)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
-    note_groups = {
-        note: {
-            "parent_account": data["parent_account"],
-            "account_names": list(data["account_names"]),  # Include account names
-            "relevant_accounts": list(data["relevant_accounts"]),
+    account_groups = {
+        account_name: {
+            "parent_accounts": list(data["parent_accounts"]),  # Include parent accounts
+            "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
             "amounts": data["amounts"],  # Include individual amounts
+            "notes": list(data["notes"]),  # Include note numbers
             "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
-        for note, data in note_groups.items()
+        for account_name, data in account_groups.items()
     }
 
-    # **Fix the filtering** to include notes starting from 18 upwards
-    note_groups = {note: data for note, data in note_groups.items() if int(note) >= 18}
-
-    # If no notes starting from 18, return an empty dictionary
-    if not note_groups:
-        return jsonify({})
-
-    return jsonify(note_groups)
+    return jsonify(account_groups)
 
 
 if __name__ == '__main__':
