@@ -182,7 +182,7 @@ class InvoiceIssued(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
     user = db.relationship('User', back_populates='invoices_issued')
     account_debited = db.Column(db.String(100), nullable=True)
-    account_credited = db.Column(db.String(100), nullable=True)
+    account_credited =  db.Column(db.JSON, nullable=True) 
     name = db.Column(db.String(50), nullable=True)
 
     # Add composite unique constraint on user_id and invoice_number
@@ -194,7 +194,6 @@ class InvoiceIssued(db.Model):
         return f'<InvoiceIssued {self.invoice_number}>'
 
 
-# InvoiceReceived Model
 class InvoiceReceived(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     invoice_number = db.Column(db.String(50), nullable=False)
@@ -207,7 +206,7 @@ class InvoiceReceived(db.Model):
     coa_id = db.Column(db.Integer, db.ForeignKey('chart_of_accounts.id'), nullable=True)
     chart_of_account = db.relationship('ChartOfAccounts', back_populates='invoices_received')
     user = db.relationship('User', back_populates='invoices_received')
-    account_debited = db.Column(db.String(100), nullable=True)
+    account_debited =  db.Column(db.JSON, nullable=True) 
     account_credited = db.Column(db.String(100), nullable=True)
     grn_number = db.Column(db.String(20), nullable=True)
 

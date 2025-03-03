@@ -878,7 +878,7 @@ def update_delete_invoice(id):
 
 # Combined GET and POST for /invoice-received
 
-@app.route('/invoice-received', methods=['GET', 'POST'])
+@app.route('/invoice-received', methods=['GET', 'POST'], strict_slashes=False)
 @jwt_required()
 def handle_invoices():
     current_user = get_jwt_identity()
@@ -889,7 +889,6 @@ def handle_invoices():
     user_id = current_user['id']
 
     if request.method == 'GET':
-        # Fetch invoices for the current user
         invoices = InvoiceReceived.query.filter_by(user_id=user_id).all()
         return jsonify([{
             "id": invoice.id,
@@ -900,11 +899,10 @@ def handle_invoices():
             "account_debited": invoice.account_debited,
             "account_credited": invoice.account_credited,
             "grn_number": invoice.grn_number,
-            "name": invoice.name,  # Include the 'name' field in the response
+            "name": invoice.name,
         } for invoice in invoices]), 200
 
     elif request.method == 'POST':
-        # Create a new invoice
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -915,11 +913,11 @@ def handle_invoices():
                 date_issued=datetime.strptime(data['date_issued'], '%Y-%m-%d').date(),
                 description=data.get('description'),
                 amount=data['amount'],
-                user_id=user_id,  # Use the user_id from the current_user
+                user_id=user_id,
                 account_debited=data.get('account_debited'),
                 account_credited=data.get('account_credited'),
                 grn_number=data.get('grn_number'),
-                name=data.get('name'),  # Capture the 'name' field from the request
+                name=data.get('name'),
             )
             db.session.add(new_invoice)
             db.session.commit()
@@ -3182,10 +3180,7 @@ def submit_transaction():
         description = data.get('description')
         date_issued = data.get('dateIssued')  # Extract date_issued from the request
 
-        # Optional: Basic validation
-        if not credited_account or not debited_account or not amount_credited or not amount_debited or not date_issued:
-            return jsonify({"error": "Missing required fields"}), 400
-
+     
         # Convert date_issued to a datetime object
         try:
             date_issued = datetime.strptime(date_issued, '%Y-%m-%d').date()
@@ -3209,6 +3204,15 @@ def submit_transaction():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/invoices/<int:id>/post', methods=['POST'])
+def post_invoice(id):
+    invoice = InvoiceIssued.query.get_or_404(id)
+    invoice.posted = True
+    db.session.commit()
+    return jsonify({"message": "Invoice posted successfully"}), 200
+
+
 
 
 @app.route('/get-transactions', methods=['GET'])
@@ -3381,7 +3385,7 @@ def get_transaction():
     grouped_accounts = []
     for account_code, balances in account_balances.items():
         if is_account_code_less_than_1099(account_code):
-            closing_balance = balances["credits"] - balances["debits"]  # Calculate closing balance
+            closing_balance = balances["debits"] - balances["credits"]  # Calculate closing balance
             grouped_accounts.append({
                 "account_code": account_code,
                 "total_debits": balances["debits"],
@@ -3989,10 +3993,8 @@ def get_net_assets():
         print(f"Error fetching net assets: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/trial-balance', methods=['GET'])
 @jwt_required()
-
 def get_trials_balance():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
@@ -4034,8 +4036,7 @@ def get_trials_balance():
     # Group transactions by note number
     note_groups = defaultdict(lambda: {
         "parent_account": None,
-        "relevant_accounts": set(),
-        "amounts": [],  # List to store individual amounts
+        "relevant_accounts": {},  # Dictionary to store account details and their amounts
         "total_debits": 0.0,
         "total_credits": 0.0,
         "closing_balance": 0.0  # Placeholder for closing balance
@@ -4075,8 +4076,17 @@ def get_trials_balance():
             note_number = parent_debited.get("note_number")
             parent_account = parent_debited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(debited_account)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+
+            # Initialize the account if it doesn't exist
+            if debited_account not in note_groups[note_number]["relevant_accounts"]:
+                note_groups[note_number]["relevant_accounts"][debited_account] = {
+                    "amounts": [],  # List to store individual amounts
+                    "total": 0.0  # Total amount for this account
+                }
+
+            # Add the amount to the account
+            note_groups[note_number]["relevant_accounts"][debited_account]["amounts"].append(amount)
+            note_groups[note_number]["relevant_accounts"][debited_account]["total"] += amount
             note_groups[note_number]["total_debits"] += amount  # Add to total debits
 
         # Handle credited account
@@ -4084,8 +4094,17 @@ def get_trials_balance():
             note_number = parent_credited.get("note_number")
             parent_account = parent_credited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(credited_account)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+
+            # Initialize the account if it doesn't exist
+            if credited_account not in note_groups[note_number]["relevant_accounts"]:
+                note_groups[note_number]["relevant_accounts"][credited_account] = {
+                    "amounts": [],  # List to store individual amounts
+                    "total": 0.0  # Total amount for this account
+                }
+
+            # Add the amount to the account
+            note_groups[note_number]["relevant_accounts"][credited_account]["amounts"].append(amount)
+            note_groups[note_number]["relevant_accounts"][credited_account]["total"] += amount
             note_groups[note_number]["total_credits"] += amount  # Add to total credits
 
     # Calculate the closing balance (debits - credits) for each note
@@ -4096,8 +4115,13 @@ def get_trials_balance():
     note_groups = {
         note: {
             "parent_account": data["parent_account"],
-            "relevant_accounts": list(data["relevant_accounts"]),
-            "amounts": data["amounts"],  # Include individual amounts
+            "relevant_accounts": {
+                account: {
+                    "amounts": amounts_data["amounts"],  # Include individual amounts
+                    "total": round(amounts_data["total"], 2)  # Round total for the account
+                }
+                for account, amounts_data in data["relevant_accounts"].items()
+            },
             "total_debits": round(data["total_debits"], 2),  # Round total debits
             "total_credits": round(data["total_credits"], 2),  # Round total credits
             "closing_balance": round(data["closing_balance"], 2)  # Round closing balance
@@ -4111,15 +4135,13 @@ def get_trials_balance():
         if str(note) not in note_groups:
             note_groups[str(note)] = {
                 "parent_account": None,
-                "relevant_accounts": [],
-                "amounts": [],  # Empty list for amounts
+                "relevant_accounts": {},  # Empty dictionary for relevant accounts
                 "total_debits": 0.0,
                 "total_credits": 0.0,
                 "closing_balance": 0.0  # Empty closing balance
             }
 
     return jsonify(note_groups)
-
 
 
 
@@ -4246,9 +4268,6 @@ def get_accounts_debited_credited():
 
 
 
-
-from collections import defaultdict
-
 @app.route('/income-statement/accounts', methods=['GET'])
 @jwt_required()
 def get_income_accounts_debited_credited():
@@ -4289,15 +4308,36 @@ def get_income_accounts_debited_credited():
         invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
     )
 
-    # Group transactions by account name (e.g., 400-Revenue From Non-Exch Transactions)
+    # Initialize account_groups with all accounts in the range 400-599
     account_groups = defaultdict(lambda: {
-        "parent_accounts": set(),  # Store parent accounts
+        "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
         "relevant_accounts": set(),  # Store relevant sub-accounts
-        "amounts": [],  # List to store individual amounts
-        "notes": set(),  # Store note numbers
-        "total_amount": 0.0
+        "total_amount": 0.0  # Total amount for the account group
     })
 
+    # Fetch all accounts in the range 400-599 and initialize them
+    for acc in all_accounts:
+        if acc.account_name and acc.account_name.split('-')[0].isdigit():
+            account_number = int(acc.account_name.split('-')[0])
+            if 400 <= account_number <= 599:
+                # Initialize the account group if it doesn't exist
+                if acc.account_name not in account_groups:
+                    account_groups[acc.account_name] = {
+                        "parent_accounts": {},
+                        "relevant_accounts": set(),
+                        "total_amount": 0.0
+                    }
+
+                # Initialize parent accounts for the account group
+                for subaccount in acc.sub_account_details:
+                    parent_account = subaccount.get('name', '')
+                    if parent_account:
+                        account_groups[acc.account_name]["parent_accounts"][parent_account] = {
+                            "amount": 0.0,
+                            "note_number": acc.note_number  # Include note number for the parent account
+                        }
+
+    # Process transactions and update amounts for accounts with transactions
     for transaction in all_transactions:
         # Initialize variables for amount, debited_account, and credited_account
         amount = 0.0
@@ -4351,10 +4391,16 @@ def get_income_accounts_debited_credited():
                 sub_account_name = parent_debited.get("sub_account_name")
                 note_number = parent_debited.get("note_number")
 
-                account_groups[account_name]["parent_accounts"].add(parent_account)
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = {
+                        "amount": 0.0,
+                        "note_number": note_number
+                    }
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["amounts"].append(amount)
-                account_groups[account_name]["notes"].add(note_number)
                 account_groups[account_name]["total_amount"] += amount
 
         # Handle credited account information
@@ -4365,26 +4411,35 @@ def get_income_accounts_debited_credited():
                 sub_account_name = parent_credited.get("sub_account_name")
                 note_number = parent_credited.get("note_number")
 
-                account_groups[account_name]["parent_accounts"].add(parent_account)
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = {
+                        "amount": 0.0,
+                        "note_number": note_number
+                    }
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["amounts"].append(amount)
-                account_groups[account_name]["notes"].add(note_number)
                 account_groups[account_name]["total_amount"] += amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
     account_groups = {
         account_name: {
-            "parent_accounts": list(data["parent_accounts"]),  # Include parent accounts
-            "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
-            "amounts": data["amounts"],  # Include individual amounts
-            "notes": list(data["notes"]),  # Include note numbers
-            "total_amount": round(data["total_amount"], 2)  # Round total amount
+            "parent_accounts": {
+                parent_account: {
+                    "amount": data["amount"],
+                    "note_number": data["note_number"]
+                }
+                for parent_account, data in account_data["parent_accounts"].items()
+            },
+            "relevant_accounts": list(account_data["relevant_accounts"]),
+            "total_amount": round(account_data["total_amount"], 2)
         }
-        for account_name, data in account_groups.items()
+        for account_name, account_data in account_groups.items()
     }
 
     return jsonify(account_groups)
-
 from collections import defaultdict
 
 @app.route('/balance-statement/accounts', methods=['GET'])
@@ -4429,11 +4484,10 @@ def get_balance_accounts_debited_credited():
 
     # Group transactions by account name (e.g., 100-Current Assets)
     account_groups = defaultdict(lambda: {
-        "parent_accounts": set(),  # Store parent accounts
+        "parent_accounts": {},  # Store parent accounts and their individual amounts
         "relevant_accounts": set(),  # Store relevant sub-accounts
-        "amounts": [],  # List to store individual amounts
         "notes": set(),  # Store note numbers
-        "total_amount": 0.0
+        "total_amount": 0.0  # Total amount for the account group
     })
 
     for transaction in all_transactions:
@@ -4489,9 +4543,13 @@ def get_balance_accounts_debited_credited():
                 sub_account_name = parent_debited.get("sub_account_name")
                 note_number = parent_debited.get("note_number")
 
-                account_groups[account_name]["parent_accounts"].add(parent_account)
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["amounts"].append(amount)
                 account_groups[account_name]["notes"].add(note_number)
                 account_groups[account_name]["total_amount"] += amount
 
@@ -4503,18 +4561,21 @@ def get_balance_accounts_debited_credited():
                 sub_account_name = parent_credited.get("sub_account_name")
                 note_number = parent_credited.get("note_number")
 
-                account_groups[account_name]["parent_accounts"].add(parent_account)
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["amounts"].append(amount)
                 account_groups[account_name]["notes"].add(note_number)
                 account_groups[account_name]["total_amount"] += amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
     account_groups = {
         account_name: {
-            "parent_accounts": list(data["parent_accounts"]),  # Include parent accounts
+            "parent_accounts": data["parent_accounts"],  # Include parent accounts and their amounts
             "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
-            "amounts": data["amounts"],  # Include individual amounts
             "notes": list(data["notes"]),  # Include note numbers
             "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
@@ -4522,7 +4583,6 @@ def get_balance_accounts_debited_credited():
     }
 
     return jsonify(account_groups)
-
 
 if __name__ == '__main__':
     app.run(debug=True)
