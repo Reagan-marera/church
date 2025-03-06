@@ -13,6 +13,8 @@ import  logging
 from datetime import date
 import requests
 import json
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func,or_
 from sqlalchemy.orm.exc import NoResultFound
@@ -776,6 +778,7 @@ def manage_invoices():
                 'account_credited': inv.account_credited,
                 'description': inv.description,
                 'name': inv.name,  # Include the 'name' field in the response
+                'manual_number': inv.manual_number  # Include the manual_number in the response
             } for inv in invoices]), 200
 
         elif request.method == 'POST':
@@ -799,7 +802,13 @@ def manage_invoices():
             if existing_invoice:
                 return jsonify({'error': 'Invoice number already exists for this user'}), 400
 
-            # Create and save the new invoice with the user_id
+            # Validate manual_number if it exists
+            manual_number = data.get('manual_number')
+        if manual_number is not None:
+            if not isinstance(manual_number, str):
+                return jsonify({'error': 'manual_number must be a string'}), 400
+
+            # Create and save the new invoice with the user_id and manual_number
             new_invoice = InvoiceIssued(
                 invoice_number=data['invoice_number'],
                 date_issued=date_issued,
@@ -809,6 +818,7 @@ def manage_invoices():
                 description=data.get('description'),
                 name=data.get('name'),  # Capture the 'name' field from the request
                 user_id=user_id,  # Use the user_id from the current_user
+                manual_number=manual_number  # Add manual_number from the request
             )
 
             db.session.add(new_invoice)
@@ -820,7 +830,6 @@ def manage_invoices():
         app.logger.error(f"Error managing invoices: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
 
-    
     
 @app.route('/invoices/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
@@ -1038,7 +1047,6 @@ def delete_invoice(invoice_id):
     except RuntimeError as e:
         db.session.rollback()
         return jsonify({"error": f"Database error: {str(e)}"}), 500
-
 @app.route('/cash-receipt-journals', methods=['POST'])
 @jwt_required()
 def create_cash_receipt():
@@ -1046,33 +1054,27 @@ def create_cash_receipt():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Parse incoming JSON data
         data = request.get_json()
-
-        # Validate required fields
         required_fields = ['receipt_date', 'receipt_no', 'receipt_type']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({'error': f'Missing fields: {", ".join(missing_fields)}'}), 400
 
-        # Validate receipt_date format
         try:
             receipt_date = datetime.strptime(data['receipt_date'], '%Y-%m-%d').date()
         except ValueError:
             return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
-        # Check for duplicate receipt_no for the current user
         if CashReceiptJournal.query.filter_by(created_by=current_user_id, receipt_no=data['receipt_no']).first():
             return jsonify({'error': f'Receipt number {data["receipt_no"]} already exists for your account.'}), 400
 
-        # Validate cash and bank values
         cash = float(data.get('cash', 0))
         bank = float(data.get('bank', 0))
 
-        # Calculate total
-        total = cash + bank
+        manual_number = data.get('manual_number')
+        if manual_number is not None and not isinstance(manual_number, str):
+            return jsonify({'error': 'manual_number must be a string'}), 400
 
-        # Create a new CashReceiptJournal entry
         new_journal = CashReceiptJournal(
             receipt_date=receipt_date,
             receipt_no=data['receipt_no'],
@@ -1084,19 +1086,26 @@ def create_cash_receipt():
             account_credited=data.get('account_credited'),
             cash=cash,
             bank=bank,
-            total=total,
             cashbook=data.get('cashbook'),
             created_by=current_user_id,
-            name=data.get('name')
+            name=data.get('name'),
+            selected_invoice_id=data.get('selected_invoice_id'),
+            manual_number=manual_number
         )
 
-        # Save to the database
         new_journal.save()
 
         return jsonify({'message': 'Journal entry created successfully', 'data': new_journal.__repr__()}), 201
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'Database integrity error. Check your data.'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Get (GET)
 @app.route('/cash-receipt-journals', methods=['GET'])
 @jwt_required()
 def get_cash_receipts():
@@ -1111,7 +1120,7 @@ def get_cash_receipts():
         result = [
             {
                 'id': journal.id,
-                'receipt_date': journal.receipt_date.isoformat(),
+                'receipt_date': journal.receipt_date.isoformat() if journal.receipt_date else None,
                 'receipt_no': journal.receipt_no,
                 'ref_no': journal.ref_no,
                 'from_whom_received': journal.from_whom_received,
@@ -1123,7 +1132,9 @@ def get_cash_receipts():
                 'bank': journal.bank,
                 'total': journal.total,
                 'cashbook': journal.cashbook,
-                'name': journal.name
+                'name': journal.name,
+                'selected_invoice_id': journal.selected_invoice_id,
+                'manual_number': journal.manual_number  # Add manual_number field
             }
             for journal in journals
         ]
@@ -1131,6 +1142,22 @@ def get_cash_receipts():
         return jsonify(result), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/last-receipt-number', methods=['GET'])
+def get_last_receipt_number():
+    try:
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({"error": "User is not authenticated"}), 401
+
+        # Fetch the last receipt number from the database
+        last_receipt = CashReceiptJournal.query.order_by(CashReceiptJournal.receipt_no.desc()).first()
+        last_receipt_no = last_receipt.receipt_no if last_receipt else "0"
+
+        return jsonify({"lastReceiptNo": last_receipt_no}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 @app.route('/cash-receipt-journals/<int:id>', methods=['DELETE'])
 @jwt_required()
 def delete_cash_receipt(id):
@@ -1150,6 +1177,7 @@ def delete_cash_receipt(id):
         return jsonify({'message': 'Journal entry deleted successfully'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 @app.route('/cash-receipt-journals/<int:id>', methods=['PUT'])
 @jwt_required()
 def update_cash_receipt(id):
@@ -1173,7 +1201,7 @@ def update_cash_receipt(id):
                 return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
         if 'receipt_no' in data:
-            if CashReceiptJournal.query.filter(CashReceiptJournal.id != id, CashReceiptJournal.created_by == current_user_id, CashReceiptJournal.receipt_no == data['receipt_no']).first():
+            if CashReceiptJournal.query.filter(and_(CashReceiptJournal.id != id, CashReceiptJournal.created_by == current_user_id, CashReceiptJournal.receipt_no == data['receipt_no'])).first():
                 return jsonify({'error': f'Receipt number {data["receipt_no"]} already exists for your account.'}), 400
             journal.receipt_no = data['receipt_no']
 
@@ -1191,15 +1219,21 @@ def update_cash_receipt(id):
 
         journal.cashbook = data.get('cashbook', journal.cashbook)
         journal.name = data.get('name', journal.name)
+        journal.selected_invoice_id = data.get('selected_invoice_id', journal.selected_invoice_id)
 
         # Save changes
         db.session.commit()
 
         return jsonify({'message': 'Journal entry updated successfully', 'data': journal.__repr__()}), 200
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except NameError:
+        db.session.rollback()
+        return jsonify({'error': 'Database integrity error. Check your data.'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
+# Create (POST)
 # Create (POST)
 @app.route('/cash-disbursement-journals', methods=['POST'])
 @jwt_required()
@@ -1212,7 +1246,7 @@ def create_disbursement():
         data = request.get_json()
 
         # Validate required fields
-        required_fields = ['disbursement_date', 'cheque_no', 'to_whom_paid',  'account_credited', 'cashbook']
+        required_fields = ['disbursement_date', 'cheque_no', 'to_whom_paid', 'account_credited', 'cashbook']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({'error': f'Missing fields: {", ".join(missing_fields)}'}), 400
@@ -1234,6 +1268,12 @@ def create_disbursement():
         # Calculate total
         total = cash + bank
 
+        # Validate manual_number if it exists
+        manual_number = data.get('manual_number')
+        if manual_number is not None:
+            if not isinstance(manual_number, str):
+                return jsonify({'error': 'manual_number must be a string'}), 400
+
         # Create a new CashDisbursementJournal entry
         new_disbursement = CashDisbursementJournal(
             disbursement_date=disbursement_date,
@@ -1249,7 +1289,8 @@ def create_disbursement():
             cash=cash,
             bank=bank,
             total=total,
-            created_by=current_user_id
+            created_by=current_user_id,
+            manual_number=manual_number  # Add manual_number here
         )
 
         # Save to the database
@@ -1287,7 +1328,9 @@ def get_disbursements():
                 'cashbook': disbursement.cashbook,
                 'cash': disbursement.cash,
                 'bank': disbursement.bank,
-                'total': disbursement.total
+                'total': disbursement.total,
+                'manual_number': disbursement.manual_number  # Add manual_number field
+
             }
             for disbursement in disbursements
         ]
@@ -3287,6 +3330,7 @@ def delete_transaction(id):
 
 
 
+
 @app.route('/api/transactions', methods=['GET'])
 @jwt_required()
 def get_transaction():
@@ -3363,23 +3407,24 @@ def get_transaction():
         amount_debited = transaction.amount_debited if debited_account_valid else 0
         amount_credited = transaction.amount_credited if credited_account_valid else 0
 
-        # Add transaction to the list
-        transactions.append({
-            "transaction_type": "Transaction",
-            "date": transaction.date_issued.isoformat() if transaction.date_issued else None,
-            "description": transaction.description,
-            "account_debited": transaction.debited_account_name,
-            "account_credited": transaction.credited_account_name,
-            "amount_debited": amount_debited,
-            "amount_credited": amount_credited,
-            "created_by": "Transaction Model",  # Placeholder, adjust as needed
-        })
+        # Only append the transaction if either debited or credited amount is non-zero
+        if amount_debited > 0 or amount_credited > 0:
+            transactions.append({
+                "transaction_type": "Transaction",
+                "date": transaction.date_issued.isoformat() if transaction.date_issued else None,
+                "description": transaction.description,
+                "account_debited": transaction.debited_account_name,
+                "account_credited": transaction.credited_account_name,
+                "amount_debited": amount_debited,
+                "amount_credited": amount_credited,
+                "created_by": "Transaction Model",  # Placeholder, adjust as needed
+            })
 
-        # Update account balances for all accounts
-        if debited_account_valid:
-            account_balances[transaction.debited_account_name]["debits"] += transaction.amount_debited  # Debit the debited account
-        if credited_account_valid:
-            account_balances[transaction.credited_account_name]["credits"] += transaction.amount_credited  # Credit the credited account
+            # Update account balances for all accounts
+            if debited_account_valid:
+                account_balances[transaction.debited_account_name]["debits"] += transaction.amount_debited  # Debit the debited account
+            if credited_account_valid:
+                account_balances[transaction.credited_account_name]["credits"] += transaction.amount_credited  # Credit the credited account
 
     # Calculate the closing balance for each account
     grouped_accounts = []
@@ -3401,6 +3446,8 @@ def get_transaction():
 
 
 
+
+
 @app.route('/revenuetransactions', methods=['GET'])
 @jwt_required()
 def get_all_revenue():
@@ -3410,14 +3457,32 @@ def get_all_revenue():
     # Helper function to extract the numeric part of the account_credited field
     def extract_account_code(account_field):
         """Helper function to extract the numeric part of the account code."""
-        if account_field and '-' in account_field:
-            try:
-                return int(account_field.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_field}")
-                return None
-        print(f"Invalid account field format: {account_field}")
-        return None
+        if isinstance(account_field, list):
+            # Handle the case where account_field is a list of dictionaries
+            for item in account_field:
+                if 'name' in item:
+                    account_name = item['name']
+                    if account_name and '-' in account_name:
+                        try:
+                            return int(account_name.split('-')[0].strip())
+                        except ValueError:
+                            print(f"Failed to extract account code from: {account_name}")
+                            continue
+            print(f"Invalid account field format: {account_field}")
+            return None
+        elif isinstance(account_field, str):
+            # Handle the case where account_field is a single string
+            if account_field and '-' in account_field:
+                try:
+                    return int(account_field.split('-')[0].strip())
+                except ValueError:
+                    print(f"Failed to extract account code from: {account_field}")
+                    return None
+            print(f"Invalid account field format: {account_field}")
+            return None
+        else:
+            print(f"Invalid account field format: {account_field}")
+            return None
 
     # Helper function to get parent account from ChartOfAccounts
     def get_parent_account(account_code):
@@ -3438,7 +3503,8 @@ def get_all_revenue():
         data = model.query.all()
         filtered_data = [
             item for item in data
-            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
+            if extract_account_code(getattr(item, account_field)) is not None
+            and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
         ]
         return filtered_data
 
@@ -3513,15 +3579,19 @@ def get_all_expense():
 
     def extract_account_code(account_field):
         """Helper function to extract the numeric part of the account code."""
-        if account_field and '-' in account_field:
-            try:
-                return int(account_field.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_field}")
-                return None
-        print(f"Invalid account field format: {account_field}")
-        return None
-
+        if isinstance(account_field, list):
+            # Handle the case where account_field is a list of dictionaries
+            for item in account_field:
+                if 'name' in item:
+                    account_name = item['name']
+                    if account_name and '-' in account_name:
+                        try:
+                            return int(account_name.split('-')[0].strip())
+                        except ValueError:
+                            print(f"Failed to extract account code from: {account_name}")
+                            continue
+            print(f"Invalid account field format: {account_field}")
+            return None
     def get_parent_account(account_code):
         """Helper function to get the parent account based on account code."""
         if account_code:
@@ -3607,23 +3677,34 @@ def get_all_expense():
 
 
 
-
 @app.route('/assettransactions', methods=['GET'])
 @jwt_required()
-
 def get_all_assets():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
     def extract_account_code(account_field):
-        """Helper function to extract numeric part of the account code."""
-        if account_field and '-' in account_field:
+        """Helper function to extract the numeric part of the account code."""
+        if isinstance(account_field, list):
+            # Handle case where account_field is a list of dictionaries
+            for item in account_field:
+                if 'name' in item:
+                    account_name = item['name']
+                    if account_name and '-' in account_name:
+                        try:
+                            return int(account_name.split('-')[0].strip())  # Return the numeric part
+                        except ValueError:
+                            print(f"Failed to extract account code from: {account_name}")
+                            continue
+            print(f"Invalid account field format: {account_field}")
+            return None
+        elif isinstance(account_field, str) and '-' in account_field:
+            # Handle case where account_field is a string like 'XXX- Account Name'
             try:
-                return int(account_field.split('-')[0].strip())
+                return int(account_field.split('-')[0].strip())  # Extract numeric code
             except ValueError:
                 print(f"Failed to extract account code from: {account_field}")
                 return None
-        print(f"Invalid account field format: {account_field}")
         return None
 
     def get_parent_account(account_code):
@@ -3753,7 +3834,6 @@ def get_all_assets():
         # Handle any potential errors and return a meaningful response
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/liabilitytransactions', methods=['GET'])
 @jwt_required()
 
@@ -3762,15 +3842,20 @@ def get_all_liabilities():
     current_user_id = current_user.get('id')
 
     def extract_account_code(account_field):
-        """Helper function to extract numeric part of the account code."""
-        if account_field and '-' in account_field:
-            try:
-                return int(account_field.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_field}")
-                return None
-        print(f"Invalid account field format: {account_field}")
-        return None
+        """Helper function to extract the numeric part of the account code."""
+        if isinstance(account_field, list):
+            # Handle the case where account_field is a list of dictionaries
+            for item in account_field:
+                if 'name' in item:
+                    account_name = item['name']
+                    if account_name and '-' in account_name:
+                        try:
+                            return int(account_name.split('-')[0].strip())
+                        except ValueError:
+                            print(f"Failed to extract account code from: {account_name}")
+                            continue
+            print(f"Invalid account field format: {account_field}")
+            return None
 
     def get_parent_account(account_code):
         """Helper function to get the parent account based on account code."""
@@ -3900,15 +3985,20 @@ def get_net_assets():
     current_user_id = current_user.get('id')
 
     def extract_account_code(account_field):
-        """Extract account code from account field."""
-        if account_field and '-' in account_field:
-            try:
-                return int(account_field.split('-')[0].strip())
-            except ValueError:
-                print(f"Failed to extract account code from: {account_field}")
-                return None
-        print(f"Invalid account field format: {account_field}")
-        return None
+        """Helper function to extract the numeric part of the account code."""
+        if isinstance(account_field, list):
+            # Handle the case where account_field is a list of dictionaries
+            for item in account_field:
+                if 'name' in item:
+                    account_name = item['name']
+                    if account_name and '-' in account_name:
+                        try:
+                            return int(account_name.split('-')[0].strip())
+                        except ValueError:
+                            print(f"Failed to extract account code from: {account_name}")
+                            continue
+            print(f"Invalid account field format: {account_field}")
+            return None
 
     # Helper function to get the parent account from ChartOfAccounts using account code
     def get_parent_account(account_code, accounts):

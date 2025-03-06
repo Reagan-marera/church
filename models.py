@@ -182,17 +182,20 @@ class InvoiceIssued(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
     user = db.relationship('User', back_populates='invoices_issued')
     account_debited = db.Column(db.String(100), nullable=True)
-    account_credited =  db.Column(db.JSON, nullable=True) 
+    account_credited = db.Column(db.JSON, nullable=True)
     name = db.Column(db.String(50), nullable=True)
+    manual_number = db.Column(db.String(50), nullable=True)  # Change to String type (VARCHAR equivalent)
 
     # Add composite unique constraint on user_id and invoice_number
     __table_args__ = (
         db.UniqueConstraint('user_id', 'invoice_number', name='unique_invoice_per_user'),
     )
 
+    # Adding relationship to CashReceiptJournal
+    receipts = db.relationship('CashReceiptJournal', back_populates='selected_invoice', lazy=True)
+
     def __repr__(self):
         return f'<InvoiceIssued {self.invoice_number}>'
-
 
 class InvoiceReceived(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -237,6 +240,10 @@ class CashReceiptJournal(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_by_user = db.relationship('User', back_populates='cash_receipts')
     name = db.Column(db.String(50), nullable=True)
+    selected_invoice_id = db.Column(db.Integer, db.ForeignKey('invoice_issued.id'), nullable=True)  # Link to InvoiceIssued
+    selected_invoice = db.relationship('InvoiceIssued', back_populates='receipts')
+    manual_number = db.Column(db.String(50), nullable=True)  # Change to String type (VARCHAR equivalent)
+
     __table_args__ = (
         UniqueConstraint('created_by', 'receipt_no', name='unique_receipt_per_user'),
     )
@@ -272,7 +279,8 @@ class CashDisbursementJournal(db.Model):
     cash = db.Column(db.Float, nullable=False, default=0.0)
     bank = db.Column(db.Float, nullable=False, default=0.0)  # Updated to Float for numeric values
     total = db.Column(db.Float, nullable=False, default=0.0)  # Added total column with a default value
-    
+    manual_number = db.Column(db.String(50), nullable=True)  # Change to String type (VARCHAR equivalent)
+
     # Foreign key to User
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_by_user = db.relationship('User', back_populates='cash_disbursements')
