@@ -783,6 +783,7 @@ def manage_invoices():
 
         elif request.method == 'POST':
             data = request.get_json()
+            app.logger.info(f"Received data: {data}")  # Log the request payload
 
             # Validate required fields
             if not data.get('invoice_number'):
@@ -804,9 +805,14 @@ def manage_invoices():
 
             # Validate manual_number if it exists
             manual_number = data.get('manual_number')
-        if manual_number is not None:
-            if not isinstance(manual_number, str):
-                return jsonify({'error': 'manual_number must be a string'}), 400
+            if manual_number is not None:
+                if not isinstance(manual_number, str):
+                    return jsonify({'error': 'manual_number must be a string'}), 400
+
+            # Handle account_credited as a list of dictionaries
+            account_credited = data.get('account_credited', [])
+            if not isinstance(account_credited, list):
+                return jsonify({'error': 'account_credited must be a list of dictionaries'}), 400
 
             # Create and save the new invoice with the user_id and manual_number
             new_invoice = InvoiceIssued(
@@ -814,7 +820,7 @@ def manage_invoices():
                 date_issued=date_issued,
                 amount=float(data['amount']),
                 account_debited=data.get('account_debited'),
-                account_credited=data.get('account_credited'),
+                account_credited=account_credited,  # Store as a list of dictionaries
                 description=data.get('description'),
                 name=data.get('name'),  # Capture the 'name' field from the request
                 user_id=user_id,  # Use the user_id from the current_user
@@ -3843,39 +3849,65 @@ def get_all_liabilities():
 
     def extract_account_code(account_field):
         """Helper function to extract the numeric part of the account code."""
+        print(f"Extracting account code from: {account_field}")  # Debugging
         if isinstance(account_field, list):
             # Handle the case where account_field is a list of dictionaries
             for item in account_field:
                 if 'name' in item:
                     account_name = item['name']
+                    print(f"Processing account name: {account_name}")  # Debugging
                     if account_name and '-' in account_name:
                         try:
-                            return int(account_name.split('-')[0].strip())
+                            code = int(account_name.split('-')[0].strip())
+                            print(f"Extracted account code: {code}")  # Debugging
+                            return code
                         except ValueError:
                             print(f"Failed to extract account code from: {account_name}")
                             continue
             print(f"Invalid account field format: {account_field}")
             return None
+        elif isinstance(account_field, str):
+            # Handle the case where account_field is a string
+            if account_field and '-' in account_field:
+                try:
+                    code = int(account_field.split('-')[0].strip())
+                    print(f"Extracted account code: {code}")  # Debugging
+                    return code
+                except ValueError:
+                    print(f"Failed to extract account code from: {account_field}")
+                    return None
+            print(f"Invalid account field format: {account_field}")
+            return None
+        else:
+            print(f"Unsupported account field type: {type(account_field)}")
+            return None
 
     def get_parent_account(account_code):
         """Helper function to get the parent account based on account code."""
+        print(f"Looking up parent account for code: {account_code}")  # Debugging
         if account_code:
             account_code_str = str(account_code)
-            account = ChartOfAccounts.query.all()
-            for acc in account:
+            accounts = ChartOfAccounts.query.all()
+            for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
+                        print(f"Found parent account: {acc.parent_account}")  # Debugging
                         return acc.parent_account
+            print(f"No parent account found for code: {account_code}")  # Debugging
             return None
         return None
 
     def fetch_filtered_data(model, account_field, account_range):
         """Helper function to fetch filtered data based on account code range."""
         data = model.query.all()
-        filtered_data = [
-            item for item in data
-            if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
-        ]
+        print(f"Fetched {len(data)} records from {model.__name__}")  # Debugging
+        filtered_data = []
+        for item in data:
+            account_code = extract_account_code(getattr(item, account_field))
+            print(f"Item ID: {item.id}, Account Code: {account_code}")  # Debugging
+            if account_code and account_range[0] <= account_code <= account_range[1]:
+                filtered_data.append(item)
+        print(f"Filtered {len(filtered_data)} records for account range {account_range}")  # Debugging
         return filtered_data
 
     try:
@@ -3975,8 +4007,8 @@ def get_all_liabilities():
 
     except Exception as e:
         # Handle any potential errors and return a meaningful response
+        print(f"Error in get_all_liabilities: {str(e)}")  # Debugging
         return jsonify({'error': str(e)}), 500
-
 @app.route('/net-assets', methods=['GET'])
 @jwt_required()
 
@@ -4083,6 +4115,11 @@ def get_net_assets():
         print(f"Error fetching net assets: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+from flask import jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from collections import defaultdict
+from models import db, InvoiceIssued, InvoiceReceived, CashReceiptJournal, CashDisbursementJournal, Transaction, ChartOfAccounts
+
 @app.route('/trial-balance', methods=['GET'])
 @jwt_required()
 def get_trials_balance():
@@ -4133,33 +4170,38 @@ def get_trials_balance():
     })
 
     for transaction in all_transactions:
-        # Determine the amount and account names based on the transaction type
+    # Determine the amount and account names based on the transaction type
         if isinstance(transaction, InvoiceIssued):
             amount = transaction.amount
-            debited_account = transaction.account_debited  # Correct attribute for InvoiceIssued
-            credited_account = transaction.account_credited  # Correct attribute for InvoiceIssued
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, InvoiceReceived):
             amount = transaction.amount
-            debited_account = transaction.account_debited  # Correct attribute for InvoiceReceived
-            credited_account = transaction.account_credited  # Correct attribute for InvoiceReceived
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, CashReceiptJournal):
             amount = transaction.total
-            debited_account = transaction.account_debited  # Correct attribute for CashReceiptJournal
-            credited_account = transaction.account_credited  # Correct attribute for CashReceiptJournal
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, CashDisbursementJournal):
             amount = transaction.total
-            debited_account = transaction.account_debited  # Correct attribute for CashDisbursementJournal
-            credited_account = transaction.account_credited  # Correct attribute for CashDisbursementJournal
-        elif isinstance(transaction, Transaction):  # Handle the Transaction model
-            amount = transaction.amount_debited  # Correct logic for `amount_debited`
-            debited_account = transaction.debited_account_name  # Use `debited_account_name`
-            credited_account = transaction.credited_account_name  # Use `credited_account_name`
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
+        elif isinstance(transaction, Transaction):
+            amount = transaction.amount_debited
+            debited_account = transaction.debited_account_name
+            credited_accounts = transaction.credited_account_name
         else:
-            continue  # Skip if the amount cannot be determined
+            continue
 
-        # Get parent account details for debited and credited accounts
+        # Ensure credited_accounts is a list
+        if isinstance(credited_accounts, str):
+            credited_accounts = [{'name': credited_accounts, 'amount': amount}]
+        elif not isinstance(credited_accounts, list):
+            credited_accounts = [credited_accounts]
+
+        # Get parent account details for debited account
         parent_debited = get_parent_account_details(debited_account)
-        parent_credited = get_parent_account_details(credited_account)
 
         # Handle debited account
         if parent_debited and parent_debited.get("note_number"):
@@ -4167,35 +4209,41 @@ def get_trials_balance():
             parent_account = parent_debited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
 
-            # Initialize the account if it doesn't exist
             if debited_account not in note_groups[note_number]["relevant_accounts"]:
                 note_groups[note_number]["relevant_accounts"][debited_account] = {
-                    "amounts": [],  # List to store individual amounts
-                    "total": 0.0  # Total amount for this account
+                    "amounts": [],
+                    "total": 0.0
                 }
 
-            # Add the amount to the account
             note_groups[note_number]["relevant_accounts"][debited_account]["amounts"].append(amount)
             note_groups[note_number]["relevant_accounts"][debited_account]["total"] += amount
-            note_groups[note_number]["total_debits"] += amount  # Add to total debits
+            note_groups[note_number]["total_debits"] += amount
 
-        # Handle credited account
-        if parent_credited and parent_credited.get("note_number"):
-            note_number = parent_credited.get("note_number")
-            parent_account = parent_credited.get("parent_account")
-            note_groups[note_number]["parent_account"] = parent_account
+        # Handle credited accounts
+        for credited_account in credited_accounts:
+            if isinstance(credited_account, dict):
+                account_name = credited_account.get('name')
+                account_amount = credited_account.get('amount')
+            else:
+                account_name = credited_account
+                account_amount = amount
 
-            # Initialize the account if it doesn't exist
-            if credited_account not in note_groups[note_number]["relevant_accounts"]:
-                note_groups[note_number]["relevant_accounts"][credited_account] = {
-                    "amounts": [],  # List to store individual amounts
-                    "total": 0.0  # Total amount for this account
-                }
+            parent_credited = get_parent_account_details(account_name)
 
-            # Add the amount to the account
-            note_groups[note_number]["relevant_accounts"][credited_account]["amounts"].append(amount)
-            note_groups[note_number]["relevant_accounts"][credited_account]["total"] += amount
-            note_groups[note_number]["total_credits"] += amount  # Add to total credits
+            if parent_credited and parent_credited.get("note_number"):
+                note_number = parent_credited.get("note_number")
+                parent_account = parent_credited.get("parent_account")
+                note_groups[note_number]["parent_account"] = parent_account
+
+                if account_name not in note_groups[note_number]["relevant_accounts"]:
+                    note_groups[note_number]["relevant_accounts"][account_name] = {
+                        "amounts": [],
+                        "total": 0.0
+                    }
+
+                note_groups[note_number]["relevant_accounts"][account_name]["amounts"].append(account_amount)
+                note_groups[note_number]["relevant_accounts"][account_name]["total"] += account_amount
+                note_groups[note_number]["total_credits"] += account_amount
 
     # Calculate the closing balance (debits - credits) for each note
     for note, data in note_groups.items():
@@ -4207,14 +4255,14 @@ def get_trials_balance():
             "parent_account": data["parent_account"],
             "relevant_accounts": {
                 account: {
-                    "amounts": amounts_data["amounts"],  # Include individual amounts
-                    "total": round(amounts_data["total"], 2)  # Round total for the account
+                    "amounts": amounts_data["amounts"],
+                    "total": round(amounts_data["total"], 2)
                 }
                 for account, amounts_data in data["relevant_accounts"].items()
             },
-            "total_debits": round(data["total_debits"], 2),  # Round total debits
-            "total_credits": round(data["total_credits"], 2),  # Round total credits
-            "closing_balance": round(data["closing_balance"], 2)  # Round closing balance
+            "total_debits": round(data["total_debits"], 2),
+            "total_credits": round(data["total_credits"], 2),
+            "closing_balance": round(data["closing_balance"], 2)
         }
         for note, data in note_groups.items()
     }
@@ -4225,10 +4273,10 @@ def get_trials_balance():
         if str(note) not in note_groups:
             note_groups[str(note)] = {
                 "parent_account": None,
-                "relevant_accounts": {},  # Empty dictionary for relevant accounts
+                "relevant_accounts": {},
                 "total_debits": 0.0,
                 "total_credits": 0.0,
-                "closing_balance": 0.0  # Empty closing balance
+                "closing_balance": 0.0
             }
 
     return jsonify(note_groups)
@@ -4530,7 +4578,6 @@ def get_income_accounts_debited_credited():
     }
 
     return jsonify(account_groups)
-from collections import defaultdict
 
 @app.route('/balance-statement/accounts', methods=['GET'])
 @jwt_required()
