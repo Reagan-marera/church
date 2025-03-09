@@ -4283,11 +4283,8 @@ def get_trials_balance():
 
 
 
-
-
 @app.route('/transactions/accounts', methods=['GET'])
 @jwt_required()
-
 def get_accounts_debited_credited():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
@@ -4335,32 +4332,59 @@ def get_accounts_debited_credited():
 
     for transaction in all_transactions:
         # Determine the amount and account names based on the transaction type
-        if isinstance(transaction, InvoiceIssued):
+        if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
             amount = transaction.amount
-            debited_account = transaction.account_debited  # Use the correct attribute for InvoiceIssued
-            credited_account = transaction.account_credited  # Use the correct attribute for InvoiceIssued
-        elif isinstance(transaction, InvoiceReceived):
-            amount = transaction.amount
-            debited_account = transaction.account_debited  # Use the correct attribute for InvoiceReceived
-            credited_account = transaction.account_credited  # Use the correct attribute for InvoiceReceived
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, CashReceiptJournal):
             amount = transaction.total
-            debited_account = transaction.account_debited  # Use the correct attribute for CashReceiptJournal
-            credited_account = transaction.account_credited  # Use the correct attribute for CashReceiptJournal
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, CashDisbursementJournal):
             amount = transaction.total
-            debited_account = transaction.account_debited  # Use the correct attribute for CashDisbursementJournal
-            credited_account = transaction.account_credited  # Use the correct attribute for CashDisbursementJournal
+            debited_account = transaction.account_debited
+            credited_accounts = transaction.account_credited
         elif isinstance(transaction, Transaction):  # Handle the Transaction model
-            amount = transaction.amount_debited  # Use `amount_debited` or `amount_credited` based on your logic
-            debited_account = transaction.debited_account_name  # Use `debited_account_name` for Transaction
-            credited_account = transaction.credited_account_name  # Use `credited_account_name` for Transaction
+            amount = transaction.amount_debited
+            debited_account = transaction.debited_account_name
+            credited_accounts = transaction.credited_account_name
         else:
             continue  # Skip if the amount cannot be determined
 
-        # Get parent account details for debited and credited accounts
+        # Log the details of the invoice
+        logging.info(f"Processing Invoice: {transaction.id}")
+        logging.info(f"Debited Account: {debited_account}")
+        logging.info(f"Credited Accounts: {credited_accounts}")
+
+        # Extract account code if the account is a JSON object
+        if isinstance(debited_account, dict):
+            debited_account = debited_account.get('account_code', debited_account)
+
+        # Handle credited accounts as a list of dictionaries
+        if isinstance(credited_accounts, list):
+            for credited_account in credited_accounts:
+                if isinstance(credited_account, dict):
+                    credited_account_code = credited_account.get('name')
+                    credited_amount = credited_account.get('amount', 0)
+
+                    # Log the extracted credited account code and amount
+                    logging.info(f"Extracted Credited Account Code: {credited_account_code}")
+                    logging.info(f"Extracted Credited Amount: {credited_amount}")
+
+                    # Get parent account details for credited account
+                    parent_credited = get_parent_account_details(credited_account_code)
+
+                    # Determine the note number and parent account for the credited account
+                    if parent_credited and parent_credited.get("note_number"):
+                        note_number = parent_credited.get("note_number")
+                        parent_account = parent_credited.get("parent_account")
+                        note_groups[note_number]["parent_account"] = parent_account
+                        note_groups[note_number]["relevant_accounts"].add(credited_account_code)
+                        note_groups[note_number]["amounts"].append(credited_amount)  # Add individual amount
+                        note_groups[note_number]["total_amount"] += credited_amount
+
+        # Get parent account details for debited account
         parent_debited = get_parent_account_details(debited_account)
-        parent_credited = get_parent_account_details(credited_account)
 
         # Determine the note number and parent account for the debited account
         if parent_debited and parent_debited.get("note_number"):
@@ -4368,15 +4392,6 @@ def get_accounts_debited_credited():
             parent_account = parent_debited.get("parent_account")
             note_groups[note_number]["parent_account"] = parent_account
             note_groups[note_number]["relevant_accounts"].add(debited_account)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
-            note_groups[note_number]["total_amount"] += amount
-
-        # Determine the note number and parent account for the credited account
-        if parent_credited and parent_credited.get("note_number"):
-            note_number = parent_credited.get("note_number")
-            parent_account = parent_credited.get("parent_account")
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(credited_account)
             note_groups[note_number]["amounts"].append(amount)  # Add individual amount
             note_groups[note_number]["total_amount"] += amount
 
@@ -4388,22 +4403,10 @@ def get_accounts_debited_credited():
             "amounts": data["amounts"],  # Include individual amounts
             "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
-        for note, data in note_groups.items()
+        for note, data in note_groups.items() if data["relevant_accounts"]
     }
 
-    # Ensure all notes from 1 to the maximum note number are included, even if empty
-    max_note_number = max(int(note) for note in note_groups.keys()) if note_groups else 0
-    for note in range(1, max_note_number + 1):
-        if str(note) not in note_groups:
-            note_groups[str(note)] = {
-                "parent_account": None,
-                "relevant_accounts": [],
-                "amounts": [],  # Empty list for amounts
-                "total_amount": 0.0
-            }
-
     return jsonify(note_groups)
-
 
 
 @app.route('/income-statement/accounts', methods=['GET'])
