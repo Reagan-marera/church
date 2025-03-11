@@ -138,6 +138,22 @@ class ChartOfAccounts(db.Model):
     def __repr__(self):
         return f'<ChartOfAccounts {self.parent_account} - {self.account_name}>'
 
+
+class Estimate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    department = db.Column(db.String(100), nullable=False)
+    procurement_method = db.Column(db.String(100), nullable=False)
+    item_specifications = db.Column(db.String(255), nullable=False)
+    unit_of_measure = db.Column(db.String(50), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False)
+    current_estimated_price = db.Column(db.Float, nullable=False)
+    total_estimates = db.Column(db.Float, nullable=False)
+    parent_account = db.Column(db.String(100), nullable=False)
+    sub_account = db.Column(db.String(100), nullable=False)
+
+    def __repr__(self):
+        return f'<Estimate {self.department} - {self.item_specifications}>'
+
 # Payee Model
 class Payee(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -274,7 +290,7 @@ class CashDisbursementJournal(db.Model):
     description = db.Column(db.String(255), nullable=True)
     account_credited = db.Column(db.String(100), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
-    cashbook = db.Column(db.String(250), nullable=False) 
+    cashbook = db.Column(db.String(250), nullable=True) 
 
     cash = db.Column(db.Float, nullable=False, default=0.0)
     bank = db.Column(db.Float, nullable=False, default=0.0)  # Updated to Float for numeric values

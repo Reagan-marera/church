@@ -2,7 +2,7 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived,Transaction
+from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived,Transaction,Estimate
 from functools import wraps
 from werkzeug.security import generate_password_hash
 from flask_mail import Mail, Message
@@ -1252,7 +1252,7 @@ def create_disbursement():
         data = request.get_json()
 
         # Validate required fields
-        required_fields = ['disbursement_date', 'cheque_no', 'to_whom_paid', 'account_credited', 'cashbook']
+        required_fields = ['disbursement_date', 'cheque_no', 'to_whom_paid', 'account_credited']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({'error': f'Missing fields: {", ".join(missing_fields)}'}), 400
@@ -3332,6 +3332,83 @@ def delete_transaction(id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/estimates', methods=['GET'])
+def get_estimates():
+    """Retrieve all estimates."""
+    estimates = Estimate.query.all()
+    return jsonify([{
+        'id': estimate.id,
+        'department': estimate.department,
+        'procurement_method': estimate.procurement_method,
+        'item_specifications': estimate.item_specifications,
+        'unit_of_measure': estimate.unit_of_measure,
+        'quantity': estimate.quantity,
+        'current_estimated_price': estimate.current_estimated_price,
+        'total_estimates': estimate.total_estimates,
+        'parent_account': estimate.parent_account,
+        'sub_account': estimate.sub_account
+    } for estimate in estimates])
+
+@app.route('/estimates/<int:id>', methods=['GET'])
+def get_estimate(id):
+    """Retrieve a single estimate by ID."""
+    estimate = Estimate.query.get_or_404(id)
+    return jsonify({
+        'id': estimate.id,
+        'department': estimate.department,
+        'procurement_method': estimate.procurement_method,
+        'item_specifications': estimate.item_specifications,
+        'unit_of_measure': estimate.unit_of_measure,
+        'quantity': estimate.quantity,
+        'current_estimated_price': estimate.current_estimated_price,
+        'total_estimates': estimate.total_estimates,
+        'parent_account': estimate.parent_account,
+        'sub_account': estimate.sub_account
+    })
+
+@app.route('/estimates', methods=['POST'])
+def create_estimate():
+    """Create a new estimate."""
+    data = request.get_json()
+    new_estimate = Estimate(
+        department=data['department'],
+        procurement_method=data['procurement_method'],
+        item_specifications=data['item_specifications'],
+        unit_of_measure=data['unit_of_measure'],
+        quantity=data['quantity'],
+        current_estimated_price=data['current_estimated_price'],
+        total_estimates=data['total_estimates'],
+        parent_account=data['parent_account'],
+        sub_account=data['sub_account']
+    )
+    db.session.add(new_estimate)
+    db.session.commit()
+    return jsonify({'message': 'Estimate created successfully!'}), 201
+
+@app.route('/estimates/<int:id>', methods=['PUT'])
+def update_estimate(id):
+    """Update an existing estimate."""
+    estimate = Estimate.query.get_or_404(id)
+    data = request.get_json()
+    estimate.department = data['department']
+    estimate.procurement_method = data['procurement_method']
+    estimate.item_specifications = data['item_specifications']
+    estimate.unit_of_measure = data['unit_of_measure']
+    estimate.quantity = data['quantity']
+    estimate.current_estimated_price = data['current_estimated_price']
+    estimate.total_estimates = data['total_estimates']
+    estimate.parent_account = data['parent_account']
+    estimate.sub_account = data['sub_account']
+    db.session.commit()
+    return jsonify({'message': 'Estimate updated successfully!'})
+
+@app.route('/estimates/<int:id>', methods=['DELETE'])
+def delete_estimate(id):
+    """Delete an estimate by ID."""
+    estimate = Estimate.query.get_or_404(id)
+    db.session.delete(estimate)
+    db.session.commit()
+    return jsonify({'message': 'Estimate deleted successfully!'})
 
 
 
@@ -3621,7 +3698,7 @@ def get_all_expense():
 
     try:
         # Fetch and filter all Cash Disbursements (Expense-related) - Pulling only account_debited
-        cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (5000, 5999))
+        cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (5000, 9999))
         cash_disbursements_data = [{
             'id': cd.id,
             'disbursement_date': cd.disbursement_date.isoformat(),
@@ -3640,7 +3717,7 @@ def get_all_expense():
         } for cd in cash_disbursements_filtered]
 
         # Fetch and filter all Invoices Received (Expense-related) - Pulling only account_debited
-        invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (5000, 5999))
+        invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (5000, 9999))
         invoices_received_data = [{
             'id': inv.id,
             'invoice_number': inv.invoice_number,
@@ -3654,7 +3731,7 @@ def get_all_expense():
         } for inv in invoices_received_filtered]
 
         # Fetch and filter all Transactions (Expense-related) - Pulling both debited and credited accounts
-        transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (5000, 5999)) + fetch_filtered_data(Transaction, 'credited_account_name', (5000, 5999))
+        transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (5000, 9999)) + fetch_filtered_data(Transaction, 'credited_account_name', (5000, 9999))
         transactions_data = [{
             'id': txn.id,
             'debited_account_name': txn.debited_account_name,
@@ -4115,14 +4192,11 @@ def get_net_assets():
         print(f"Error fetching net assets: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-from flask import jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from collections import defaultdict
-from models import db, InvoiceIssued, InvoiceReceived, CashReceiptJournal, CashDisbursementJournal, Transaction, ChartOfAccounts
+
 
 @app.route('/trial-balance', methods=['GET'])
 @jwt_required()
-def get_trials_balance():
+def get_trials_balances():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
@@ -4724,5 +4798,222 @@ def get_balance_accounts_debited_credited():
 
     return jsonify(account_groups)
 
+from flask import request, jsonify
+from collections import defaultdict
+import logging
+
+@app.route('/cash_flow_statement', methods=['GET'])
+def cash_flow_statement():
+    # Get start and end dates from query parameters
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    if not start_date or not end_date:
+        return jsonify({"error": "Both start_date and end_date are required."}), 400
+
+    try:
+        # Query all receipts within the date range
+        receipts_query = CashReceiptJournal.query.filter(
+            CashReceiptJournal.receipt_date.between(start_date, end_date)
+        ).all()
+
+        # Query all disbursements within the date range
+        disbursements_query = CashDisbursementJournal.query.filter(
+            CashDisbursementJournal.disbursement_date.between(start_date, end_date)
+        ).all()
+
+        # Retrieve all accounts once to optimize performance
+        all_accounts = ChartOfAccounts.query.all()
+
+        # Log all accounts for debugging
+        logging.debug("All accounts fetched from the database:")
+        for acc in all_accounts:
+            logging.debug(f"Account Name: {acc.account_name}, Parent Account: {acc.parent_account}")
+
+        # Initialize account_groups with all accounts in the range 1-999
+        account_groups = defaultdict(lambda: {
+            "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
+            "relevant_accounts": set(),  # Store relevant sub-accounts
+            "total_amount": 0.0  # Total amount for the account group
+        })
+
+        # Fetch all accounts in the range 1-999 and initialize them
+        for acc in all_accounts:
+            if acc.account_name and acc.account_name.split('-')[0].isdigit():
+                account_number = int(acc.account_name.split('-')[0])
+                if 1 <= account_number <= 999:
+                    # Initialize the account group if it doesn't exist
+                    if acc.account_name not in account_groups:
+                        account_groups[acc.account_name] = {
+                            "parent_accounts": {},
+                            "relevant_accounts": set(),
+                            "total_amount": 0.0
+                        }
+
+                    # Initialize parent accounts for the account group
+                    for subaccount in acc.sub_account_details:
+                        parent_account = subaccount.get('name', '')
+                        if parent_account:
+                            account_groups[acc.account_name]["parent_accounts"][parent_account] = {
+                                "amount": 0.0,
+                                "note_number": acc.note_number  # Include note number for the parent account
+                            }
+
+        # Function to get account details based on account code
+        def get_account_details(account_code):
+            """Get the account details based on account code."""
+            if account_code:
+                account_code_str = str(account_code).strip()
+                for acc in all_accounts:
+                    # Check if the account_code matches the account_name
+                    if account_code_str == acc.account_name.strip():
+                        logging.debug(f"Found account: {acc.account_name}")
+                        return {
+                            "account_name": acc.account_name,
+                            "parent_accounts": get_parent_accounts(acc),
+                            "note_number": acc.note_number,
+                            "sub_account_name": None  # No sub-account for the parent itself
+                        }
+                    # Check if the account_code matches any sub-account
+                    for subaccount in acc.sub_account_details:
+                        if account_code_str == subaccount.get('name', '').strip():
+                            logging.debug(f"Found sub-account: {subaccount.get('name')} under account: {acc.account_name}")
+                            return {
+                                "account_name": acc.account_name,
+                                "parent_accounts": get_parent_accounts(acc),
+                                "note_number": acc.note_number,
+                                "sub_account_name": subaccount.get('name')  # Include sub-account name
+                            }
+                return {}  # Return empty dictionary if no account is found
+            return {}  # Return empty dictionary if no account code is provided
+
+        def get_parent_accounts(account):
+            """Recursively get parent accounts with validation and circular reference detection."""
+            parent_accounts = []
+            visited_accounts = set()
+            current_account_code = account.parent_account.strip() if account.parent_account else None
+            logging.debug(f"Starting parent lookup for: {account.account_name}, Parent: {current_account_code}")
+
+            while current_account_code:
+                if current_account_code in visited_accounts:
+                    logging.error(f"Circular reference detected for account: {current_account_code}")
+                    break
+                visited_accounts.add(current_account_code)
+
+                # Log all accounts being checked for debugging
+                logging.debug(f"Looking for parent account: {current_account_code}")
+                for acc in all_accounts:
+                    logging.debug(f"Checking account: {acc.account_name}")
+
+                parent_account = next((acc for acc in all_accounts if acc.account_name.strip() == current_account_code), None)
+                if parent_account:
+                    logging.debug(f"Found parent account: {parent_account.account_name}")
+                    parent_accounts.append({
+                        "account_name": parent_account.account_name,
+                        "note_number": parent_account.note_number
+                    })
+                    current_account_code = parent_account.parent_account.strip() if parent_account.parent_account else None
+                else:
+                    logging.warning(f"No parent account found for: {current_account_code}. Stopping lookup.")
+                    break
+
+            if not parent_accounts:
+                logging.debug(f"Account {account.account_name} is a top-level account with no parent.")
+            return parent_accounts
+
+        # Extract receipt details and calculate total receipts
+        receipts_data = [
+            {
+                "id": receipt.id,
+                "receipt_date": receipt.receipt_date.strftime('%Y-%m-%d'),
+                "receipt_no": receipt.receipt_no,
+                "ref_no": receipt.ref_no,
+                "from_whom_received": receipt.from_whom_received,
+                "description": receipt.description,
+                "receipt_type": receipt.receipt_type,
+                "account_debited": receipt.account_debited,
+                "account_credited": receipt.account_credited,
+                "bank": receipt.bank,
+                "cash": receipt.cash,
+                "total": receipt.total,
+                "cashbook": receipt.cashbook,
+                "created_by": receipt.created_by_user.username if receipt.created_by_user else None,
+                "selected_invoice_id": receipt.selected_invoice_id,
+                "manual_number": receipt.manual_number,
+                "account_debited_details": get_account_details(receipt.account_debited),
+                "account_credited_details": get_account_details(receipt.account_credited)
+            }
+            for receipt in receipts_query
+        ]
+
+        total_receipts = sum(receipt['total'] for receipt in receipts_data)
+
+        # Extract disbursement details and calculate total disbursements
+        disbursements_data = [
+            {
+                "id": disbursement.id,
+                "disbursement_date": disbursement.disbursement_date.strftime('%Y-%m-%d'),
+                "cheque_no": disbursement.cheque_no,
+                "p_voucher_no": disbursement.p_voucher_no,
+                "name": disbursement.name,
+                "to_whom_paid": disbursement.to_whom_paid,
+                "payment_type": disbursement.payment_type,
+                "description": disbursement.description,
+                "account_credited": disbursement.account_credited,
+                "account_debited": disbursement.account_debited,
+                "cashbook": disbursement.cashbook,
+                "cash": disbursement.cash,
+                "bank": disbursement.bank,
+                "total": disbursement.total,
+                "created_by": disbursement.created_by_user.username if disbursement.created_by_user else None,
+                "manual_number": disbursement.manual_number,
+                "account_debited_details": get_account_details(disbursement.account_debited),
+                "account_credited_details": get_account_details(disbursement.account_credited)
+            }
+            for disbursement in disbursements_query
+        ]
+
+        total_disbursements = sum(disbursement['total'] for disbursement in disbursements_data)
+
+        # Populate relevant_accounts based on transactions
+        for receipt in receipts_query:
+            account_debited_details = get_account_details(receipt.account_debited)
+            account_credited_details = get_account_details(receipt.account_credited)
+
+            if account_debited_details.get("account_name"):
+                account_groups[account_debited_details["account_name"]]["relevant_accounts"].add(receipt.account_debited)
+            if account_credited_details.get("account_name"):
+                account_groups[account_credited_details["account_name"]]["relevant_accounts"].add(receipt.account_credited)
+
+        # Calculate net cash flow
+        net_cash_flow = total_receipts - total_disbursements
+
+        # Convert sets to lists for JSON serialization
+        account_groups_serializable = {
+            account_name: {
+                "parent_accounts": details["parent_accounts"],
+                "relevant_accounts": list(details["relevant_accounts"]),  # Convert set to list
+                "total_amount": details["total_amount"]
+            }
+            for account_name, details in account_groups.items()
+        }
+
+        # Prepare the cash flow statement with full transaction details
+        cash_flow_statement = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_receipts": total_receipts,
+            "total_disbursements": total_disbursements,
+            "net_cash_flow": net_cash_flow,
+            "account_groups": account_groups_serializable,  # Use the serialized version
+            "receipts": receipts_data,
+            "disbursements": disbursements_data
+        }
+
+        return jsonify(cash_flow_statement)
+
+    except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+    
 if __name__ == '__main__':
     app.run(debug=True)
