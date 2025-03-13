@@ -107,14 +107,6 @@ class User(db.Model):
         return f'<User {self.username} - {self.role}>'
 
 # Example Model to store transaction data
-class Transaction(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    credited_account_name = db.Column(db.String(100), nullable=False)
-    debited_account_name = db.Column(db.String(100), nullable=False)
-    amount_credited = db.Column(db.Float, nullable=False)
-    amount_debited = db.Column(db.Float, nullable=False)
-    description = db.Column(db.String(200))
-    date_issued = db.Column(db.Date, nullable=False)
 
 
 # ChartOfAccounts Model
@@ -187,6 +179,14 @@ class Customer(db.Model):
 
     def __repr__(self):
         return f'<Customer {self.parent_account} - {self.account_name}>'
+class Transaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    credited_account_name = db.Column(db.String(100), nullable=False)
+    debited_account_name = db.Column(db.String(100), nullable=False)
+    amount_credited = db.Column(db.Float, nullable=False)
+    amount_debited = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String(200))
+    date_issued = db.Column(db.Date, nullable=False)
 
 
 class InvoiceIssued(db.Model):
