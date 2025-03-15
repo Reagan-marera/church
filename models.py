@@ -249,6 +249,7 @@ class CashReceiptJournal(db.Model):
     receipt_type = db.Column(db.String(50), nullable=False)  # Add receipt_type
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
+    parent_account = db.Column(db.String(150), nullable=True)
     bank = db.Column(db.String(100), nullable=True)
     cash = db.Column(db.Float, nullable=True)
     total = db.Column(db.Float, nullable=False)
@@ -291,7 +292,7 @@ class CashDisbursementJournal(db.Model):
     account_credited = db.Column(db.String(100), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
     cashbook = db.Column(db.String(250), nullable=True) 
-
+    parent_account = db.Column(db.String(150), nullable=True)
     cash = db.Column(db.Float, nullable=False, default=0.0)
     bank = db.Column(db.Float, nullable=False, default=0.0)  # Updated to Float for numeric values
     total = db.Column(db.Float, nullable=False, default=0.0)  # Added total column with a default value

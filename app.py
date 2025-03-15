@@ -1055,6 +1055,22 @@ def delete_invoice(invoice_id):
     except RuntimeError as e:
         db.session.rollback()
         return jsonify({"error": f"Database error: {str(e)}"}), 500
+    
+@app.route('/last-receipt-number', methods=['GET'])
+def get_last_receipt_number():
+    try:
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({"error": "User is not authenticated"}), 401
+
+        # Fetch the last receipt number from the database
+        last_receipt = CashReceiptJournal.query.order_by(CashReceiptJournal.receipt_no.desc()).first()
+        last_receipt_no = last_receipt.receipt_no if last_receipt else "0"
+
+        return jsonify({"lastReceiptNo": last_receipt_no}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 @app.route('/cash-receipt-journals', methods=['POST'])
 @jwt_required()
 def create_cash_receipt():
@@ -1098,7 +1114,8 @@ def create_cash_receipt():
             created_by=current_user_id,
             name=data.get('name'),
             selected_invoice_id=data.get('selected_invoice_id'),
-            manual_number=manual_number
+            manual_number=manual_number,
+            parent_account=data.get('parent_account')  # Add parent_account here
         )
 
         new_journal.save()
@@ -1142,7 +1159,8 @@ def get_cash_receipts():
                 'cashbook': journal.cashbook,
                 'name': journal.name,
                 'selected_invoice_id': journal.selected_invoice_id,
-                'manual_number': journal.manual_number  # Add manual_number field
+                'manual_number': journal.manual_number,
+                'parent_account': journal.parent_account  # Add parent_account field
             }
             for journal in journals
         ]
@@ -1151,21 +1169,6 @@ def get_cash_receipts():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/last-receipt-number', methods=['GET'])
-def get_last_receipt_number():
-    try:
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({"error": "User is not authenticated"}), 401
-
-        # Fetch the last receipt number from the database
-        last_receipt = CashReceiptJournal.query.order_by(CashReceiptJournal.receipt_no.desc()).first()
-        last_receipt_no = last_receipt.receipt_no if last_receipt else "0"
-
-        return jsonify({"lastReceiptNo": last_receipt_no}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 @app.route('/cash-receipt-journals/<int:id>', methods=['DELETE'])
 @jwt_required()
 def delete_cash_receipt(id):
@@ -1228,6 +1231,7 @@ def update_cash_receipt(id):
         journal.cashbook = data.get('cashbook', journal.cashbook)
         journal.name = data.get('name', journal.name)
         journal.selected_invoice_id = data.get('selected_invoice_id', journal.selected_invoice_id)
+        journal.parent_account = data.get('parent_account', journal.parent_account)  # Update parent_account
 
         # Save changes
         db.session.commit()
@@ -1240,9 +1244,8 @@ def update_cash_receipt(id):
         return jsonify({'error': 'Database integrity error. Check your data.'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-# Create (POST)
-# Create (POST)
+    
+    
 @app.route('/cash-disbursement-journals', methods=['POST'])
 @jwt_required()
 def create_disbursement():
@@ -1298,7 +1301,8 @@ def create_disbursement():
             bank=bank,
             total=total,
             created_by=current_user_id,
-            manual_number=manual_number  # Add manual_number here
+            manual_number=manual_number,
+            parent_account=data.get('parent_account')  # Add parent_account here
         )
 
         # Save to the database
@@ -1307,7 +1311,6 @@ def create_disbursement():
         return jsonify({'message': 'Disbursement entry created successfully', 'data': new_disbursement.__repr__()}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 # Read (GET)
 @app.route('/cash-disbursement-journals', methods=['GET'])
@@ -1337,8 +1340,8 @@ def get_disbursements():
                 'cash': disbursement.cash,
                 'bank': disbursement.bank,
                 'total': disbursement.total,
-                'manual_number': disbursement.manual_number  # Add manual_number field
-
+                'manual_number': disbursement.manual_number,
+                'parent_account': disbursement.parent_account  # Add parent_account field
             }
             for disbursement in disbursements
         ]
@@ -1346,7 +1349,6 @@ def get_disbursements():
         return jsonify(result), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 # Update (PUT)
 @app.route('/cash-disbursement-journals/<int:id>', methods=['PUT'])
@@ -1390,6 +1392,7 @@ def update_disbursement(id):
         disbursement.total = disbursement.cash + disbursement.bank
 
         disbursement.cashbook = data.get('cashbook', disbursement.cashbook)
+        disbursement.parent_account = data.get('parent_account', disbursement.parent_account)  # Update parent_account
 
         # Save changes
         db.session.commit()
@@ -1397,7 +1400,6 @@ def update_disbursement(id):
         return jsonify({'message': 'Disbursement entry updated successfully', 'data': disbursement.__repr__()}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 # Delete (DELETE)
 @app.route('/cash-disbursement-journals/<int:id>', methods=['DELETE'])
@@ -1419,6 +1421,9 @@ def delete_disbursement(id):
         return jsonify({'message': 'Disbursement entry deleted successfully'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+    
+    
 @app.route('/usertransactions', methods=['GET'])
 @jwt_required()
 def get_user_transactions():
@@ -4379,6 +4384,8 @@ def get_accounts_debited_credited():
     return jsonify(note_groups)
 
 
+
+
 @app.route('/income-statement/accounts', methods=['GET'])
 @jwt_required()
 def get_income_accounts_debited_credited():
@@ -4694,222 +4701,196 @@ def get_balance_accounts_debited_credited():
 
     return jsonify(account_groups)
 
-from flask import request, jsonify
-from collections import defaultdict
-import logging
+
+def extract_account_code(account):
+    """
+    Extract the numeric account code from the account string, which may contain a description.
+    This function will safely extract the numeric code before performing operations.
+    """
+    # If account is a string like '1005- Operations Acc', split at the dash and take the numeric part
+    if isinstance(account, str):
+        try:
+            # Split by dash and return the first part (before the description)
+            account_code = account.split('-')[0].strip()
+            # Check if the extracted account code is numeric
+            if account_code.isdigit():
+                return int(account_code)  # Convert the numeric part to an integer
+            else:
+                # If it's not numeric, log the issue and return a default value (e.g., empty string or 0)
+                logging.warning(f"Non-numeric account code detected: {account}. Skipping classification.")
+                return 0  # Or return a default value like 0, depending on your requirement
+        except Exception as e:
+            logging.error(f"Error extracting account code from account: {account}, Error: {str(e)}")
+            return 0  # Return a default value if extraction fails
+    
+    # If account is already an integer, return it directly
+    elif isinstance(account, int):
+        return account
+    
+    return 0  # Return a default value if account is neither a string nor integer
+
+
+
+
+
 
 @app.route('/cash_flow_statement', methods=['GET'])
-def cash_flow_statement():
-    # Get start and end dates from query parameters
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    if not start_date or not end_date:
-        return jsonify({"error": "Both start_date and end_date are required."}), 400
+@jwt_required()
+def get_cash_flow_statement():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
 
-    try:
-        # Query all receipts within the date range
-        receipts_query = CashReceiptJournal.query.filter(
-            CashReceiptJournal.receipt_date.between(start_date, end_date)
-        ).all()
+  
+    cash_receipts = db.session.query(CashReceiptJournal).all()
+    cash_disbursements = db.session.query(CashDisbursementJournal).all()
 
-        # Query all disbursements within the date range
-        disbursements_query = CashDisbursementJournal.query.filter(
-            CashDisbursementJournal.disbursement_date.between(start_date, end_date)
-        ).all()
+    # Retrieve all accounts once to optimize performance
+    all_accounts = ChartOfAccounts.query.all()
 
-        # Retrieve all accounts once to optimize performance
-        all_accounts = ChartOfAccounts.query.all()
-
-        # Log all accounts for debugging
-        logging.debug("All accounts fetched from the database:")
-        for acc in all_accounts:
-            logging.debug(f"Account Name: {acc.account_name}, Parent Account: {acc.parent_account}")
-
-        # Initialize account_groups with all accounts in the range 1-999
-        account_groups = defaultdict(lambda: {
-            "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
-            "relevant_accounts": set(),  # Store relevant sub-accounts
-            "total_amount": 0.0  # Total amount for the account group
-        })
-
-        # Fetch all accounts in the range 1-999 and initialize them
-        for acc in all_accounts:
-            if acc.account_name and acc.account_name.split('-')[0].isdigit():
-                account_number = int(acc.account_name.split('-')[0])
-                if 1 <= account_number <= 999:
-                    # Initialize the account group if it doesn't exist
-                    if acc.account_name not in account_groups:
-                        account_groups[acc.account_name] = {
-                            "parent_accounts": {},
-                            "relevant_accounts": set(),
-                            "total_amount": 0.0
-                        }
-
-                    # Initialize parent accounts for the account group
-                    for subaccount in acc.sub_account_details:
-                        parent_account = subaccount.get('name', '')
-                        if parent_account:
-                            account_groups[acc.account_name]["parent_accounts"][parent_account] = {
-                                "amount": 0.0,
-                                "note_number": acc.note_number  # Include note number for the parent account
-                            }
-
-        # Function to get account details based on account code
-        def get_account_details(account_code):
-            """Get the account details based on account code."""
-            if account_code:
-                account_code_str = str(account_code).strip()
-                for acc in all_accounts:
-                    # Check if the account_code matches the account_name
-                    if account_code_str == acc.account_name.strip():
-                        logging.debug(f"Found account: {acc.account_name}")
+    # Function to get parent account details and account names based on account code
+    def get_parent_account_details(account_code):
+        """Get the parent account details and account names based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            for acc in all_accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        # Return detailed account information including account names
                         return {
+                            "parent_account": acc.parent_account,
                             "account_name": acc.account_name,
-                            "parent_accounts": get_parent_accounts(acc),
+                            "account_type": acc.account_type,
                             "note_number": acc.note_number,
-                            "sub_account_name": None  # No sub-account for the parent itself
+                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
                         }
-                    # Check if the account_code matches any sub-account
-                    for subaccount in acc.sub_account_details:
-                        if account_code_str == subaccount.get('name', '').strip():
-                            logging.debug(f"Found sub-account: {subaccount.get('name')} under account: {acc.account_name}")
-                            return {
-                                "account_name": acc.account_name,
-                                "parent_accounts": get_parent_accounts(acc),
-                                "note_number": acc.note_number,
-                                "sub_account_name": subaccount.get('name')  # Include sub-account name
-                            }
-                return {}  # Return empty dictionary if no account is found
-            return {}  # Return empty dictionary if no account code is provided
+            return {}  # Return empty dictionary if no parent account is found
+        return {}  # Return empty dictionary if no account code is provided
 
-        def get_parent_accounts(account):
-            """Recursively get parent accounts with validation and circular reference detection."""
-            parent_accounts = []
-            visited_accounts = set()
-            current_account_code = account.parent_account.strip() if account.parent_account else None
-            logging.debug(f"Starting parent lookup for: {account.account_name}, Parent: {current_account_code}")
+    # Combine all transactions into a single list
+    all_transactions = (
+         cash_receipts + cash_disbursements 
+    )
 
-            while current_account_code:
-                if current_account_code in visited_accounts:
-                    logging.error(f"Circular reference detected for account: {current_account_code}")
-                    break
-                visited_accounts.add(current_account_code)
+    # Initialize account_groups with all accounts in the range 400-599
+    account_groups = defaultdict(lambda: {
+        "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
+        "relevant_accounts": set(),  # Store relevant sub-accounts
+        "total_amount": 0.0  # Total amount for the account group
+    })
 
-                # Log all accounts being checked for debugging
-                logging.debug(f"Looking for parent account: {current_account_code}")
-                for acc in all_accounts:
-                    logging.debug(f"Checking account: {acc.account_name}")
+    # Fetch all accounts in the range 400-599 and initialize them
+    for acc in all_accounts:
+        if acc.account_name and acc.account_name.split('-')[0].isdigit():
+            account_number = int(acc.account_name.split('-')[0])
+            if 400 <= account_number <= 599:
+                # Initialize the account group if it doesn't exist
+                if acc.account_name not in account_groups:
+                    account_groups[acc.account_name] = {
+                        "parent_accounts": {},
+                        "relevant_accounts": set(),
+                        "total_amount": 0.0
+                    }
 
-                parent_account = next((acc for acc in all_accounts if acc.account_name.strip() == current_account_code), None)
-                if parent_account:
-                    logging.debug(f"Found parent account: {parent_account.account_name}")
-                    parent_accounts.append({
-                        "account_name": parent_account.account_name,
-                        "note_number": parent_account.note_number
-                    })
-                    current_account_code = parent_account.parent_account.strip() if parent_account.parent_account else None
-                else:
-                    logging.warning(f"No parent account found for: {current_account_code}. Stopping lookup.")
-                    break
+                # Initialize parent accounts for the account group
+                for subaccount in acc.sub_account_details:
+                    parent_account = subaccount.get('name', '')
+                    if parent_account:
+                        account_groups[acc.account_name]["parent_accounts"][parent_account] = {
+                            "amount": 0.0,
+                            "note_number": acc.note_number  # Include note number for the parent account
+                        }
 
-            if not parent_accounts:
-                logging.debug(f"Account {account.account_name} is a top-level account with no parent.")
-            return parent_accounts
+    # Process transactions and update amounts for accounts with transactions
+    for transaction in all_transactions:
+        # Initialize variables for amount, debited_account, and credited_account
+        amount = 0.0
+        debited_account = None
+        credited_account = None
 
-        # Extract receipt details and calculate total receipts
-        receipts_data = [
-            {
-                "id": receipt.id,
-                "receipt_date": receipt.receipt_date.strftime('%Y-%m-%d'),
-                "receipt_no": receipt.receipt_no,
-                "ref_no": receipt.ref_no,
-                "from_whom_received": receipt.from_whom_received,
-                "description": receipt.description,
-                "receipt_type": receipt.receipt_type,
-                "account_debited": receipt.account_debited,
-                "account_credited": receipt.account_credited,
-                "bank": receipt.bank,
-                "cash": receipt.cash,
-                "total": receipt.total,
-                "cashbook": receipt.cashbook,
-                "created_by": receipt.created_by_user.username if receipt.created_by_user else None,
-                "selected_invoice_id": receipt.selected_invoice_id,
-                "manual_number": receipt.manual_number,
-                "account_debited_details": get_account_details(receipt.account_debited),
-                "account_credited_details": get_account_details(receipt.account_credited)
-            }
-            for receipt in receipts_query
-        ]
+        if isinstance(transaction, CashReceiptJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited
+        
+            continue  # Skip any unsupported transaction type
 
-        total_receipts = sum(receipt['total'] for receipt in receipts_data)
+        # Round amount to two decimal places to avoid floating-point issues
+        amount = round(amount, 2)
 
-        # Extract disbursement details and calculate total disbursements
-        disbursements_data = [
-            {
-                "id": disbursement.id,
-                "disbursement_date": disbursement.disbursement_date.strftime('%Y-%m-%d'),
-                "cheque_no": disbursement.cheque_no,
-                "p_voucher_no": disbursement.p_voucher_no,
-                "name": disbursement.name,
-                "to_whom_paid": disbursement.to_whom_paid,
-                "payment_type": disbursement.payment_type,
-                "description": disbursement.description,
-                "account_credited": disbursement.account_credited,
-                "account_debited": disbursement.account_debited,
-                "cashbook": disbursement.cashbook,
-                "cash": disbursement.cash,
-                "bank": disbursement.bank,
-                "total": disbursement.total,
-                "created_by": disbursement.created_by_user.username if disbursement.created_by_user else None,
-                "manual_number": disbursement.manual_number,
-                "account_debited_details": get_account_details(disbursement.account_debited),
-                "account_credited_details": get_account_details(disbursement.account_credited)
-            }
-            for disbursement in disbursements_query
-        ]
+        # Get parent account details for debited and credited accounts
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
 
-        total_disbursements = sum(disbursement['total'] for disbursement in disbursements_data)
+        # Function to check if the account name is within the range 400-599
+        def is_account_in_range(account_name):
+            """Check if the account name starts with a number between 400 and 599."""
+            if account_name and account_name.split('-')[0].isdigit():
+                account_number = int(account_name.split('-')[0])
+                return 1 <= account_number <= 999
+            return False
 
-        # Populate relevant_accounts based on transactions
-        for receipt in receipts_query:
-            account_debited_details = get_account_details(receipt.account_debited)
-            account_credited_details = get_account_details(receipt.account_credited)
+      
+        if parent_debited and parent_debited.get("account_name"):
+            account_name = parent_debited.get("account_name")
+            if is_account_in_range(account_name):  
+                parent_account = parent_debited.get("parent_account")
+                sub_account_name = parent_debited.get("sub_account_name")
+                note_number = parent_debited.get("note_number")
 
-            if account_debited_details.get("account_name"):
-                account_groups[account_debited_details["account_name"]]["relevant_accounts"].add(receipt.account_debited)
-            if account_credited_details.get("account_name"):
-                account_groups[account_credited_details["account_name"]]["relevant_accounts"].add(receipt.account_credited)
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = {
+                        "amount": 0.0,
+                        "note_number": note_number
+                    }
 
-        # Calculate net cash flow
-        net_cash_flow = total_receipts - total_disbursements
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["total_amount"] += amount
 
-        # Convert sets to lists for JSON serialization
-        account_groups_serializable = {
-            account_name: {
-                "parent_accounts": details["parent_accounts"],
-                "relevant_accounts": list(details["relevant_accounts"]),  # Convert set to list
-                "total_amount": details["total_amount"]
-            }
-            for account_name, details in account_groups.items()
+        # Handle credited account information
+        if parent_credited and parent_credited.get("account_name"):
+            account_name = parent_credited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 400-599
+                parent_account = parent_credited.get("parent_account")
+                sub_account_name = parent_credited.get("sub_account_name")
+                note_number = parent_credited.get("note_number")
+
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = {
+                        "amount": 0.0,
+                        "note_number": note_number
+                    }
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["total_amount"] += amount
+
+    # Convert defaultdict to a regular dictionary for JSON serialization
+    account_groups = {
+        account_name: {
+            "parent_accounts": {
+                parent_account: {
+                    "amount": data["amount"],
+                    "note_number": data["note_number"]
+                }
+                for parent_account, data in account_data["parent_accounts"].items()
+            },
+            "relevant_accounts": list(account_data["relevant_accounts"]),
+            "total_amount": round(account_data["total_amount"], 2)
         }
+        for account_name, account_data in account_groups.items()
+    }
 
-        # Prepare the cash flow statement with full transaction details
-        cash_flow_statement = {
-            "start_date": start_date,
-            "end_date": end_date,
-            "total_receipts": total_receipts,
-            "total_disbursements": total_disbursements,
-            "net_cash_flow": net_cash_flow,
-            "account_groups": account_groups_serializable,  # Use the serialized version
-            "receipts": receipts_data,
-            "disbursements": disbursements_data
-        }
+    return jsonify(account_groups)
 
-        return jsonify(cash_flow_statement)
 
-    except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
-        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
-    
 if __name__ == '__main__':
     app.run(debug=True)
