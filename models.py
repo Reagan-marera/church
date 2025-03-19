@@ -133,19 +133,46 @@ class ChartOfAccounts(db.Model):
 
 class Estimate(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    department = db.Column(db.String(100), nullable=False)
-    procurement_method = db.Column(db.String(100), nullable=False)
+    department = db.Column(db.String(255), nullable=False)
+    procurement_method = db.Column(db.String(255), nullable=False)
     item_specifications = db.Column(db.String(255), nullable=False)
     unit_of_measure = db.Column(db.String(50), nullable=False)
-    quantity = db.Column(db.Integer, nullable=False)
-    current_estimated_price = db.Column(db.Float, nullable=False)
-    total_estimates = db.Column(db.Float, nullable=False)
-    parent_account = db.Column(db.String(100), nullable=False)
-    sub_account = db.Column(db.String(100), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)  # Original quantity
+    current_estimated_price = db.Column(db.Float, nullable=False)  # Original price
+    total_estimates = db.Column(db.Float, nullable=False)  # Original total estimates
+    adjusted_quantity = db.Column(db.Float, nullable=True)  # Adjusted quantity
+    adjusted_price = db.Column(db.Float, nullable=True)  # Adjusted price
+    adjusted_total_estimates = db.Column(db.Float, nullable=True)  # Adjusted total estimates
+    parent_account = db.Column(db.String(255), nullable=True)
+    sub_account = db.Column(db.String(255), nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "department": self.department,
+            "procurement_method": self.procurement_method,
+            "item_specifications": self.item_specifications,
+            "unit_of_measure": self.unit_of_measure,
+            "quantity": self.quantity,
+            "current_estimated_price": self.current_estimated_price,
+            "total_estimates": self.total_estimates,
+            "adjusted_quantity": self.adjusted_quantity,
+            "adjusted_price": self.adjusted_price,
+            "adjusted_total_estimates": self.adjusted_total_estimates,
+            "parent_account": self.parent_account,
+            "sub_account": self.sub_account,
+        }
+
+class Adjustment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    estimate_id = db.Column(db.Integer, db.ForeignKey('estimate.id'), nullable=False)  # Foreign key to Estimate
+    adjustment_type = db.Column(db.String(50), nullable=False)  # e.g., 'price' or 'quantity'
+    adjustment_value = db.Column(db.Float, nullable=False)  # Positive or negative adjustment
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)  # Timestamp of adjustment
+    created_by = db.Column(db.String(100), nullable=True)  # Optional: Who made the adjustment
 
     def __repr__(self):
-        return f'<Estimate {self.department} - {self.item_specifications}>'
-
+        return f'<Adjustment {self.adjustment_type}: {self.adjustment_value} on {self.created_at}>'
 # Payee Model
 class Payee(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -195,6 +222,7 @@ class InvoiceIssued(db.Model):
     date_issued = db.Column(db.Date, nullable=False)
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
+    parent_account = db.Column(db.String(150), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
     user = db.relationship('User', back_populates='invoices_issued')
     account_debited = db.Column(db.String(100), nullable=True)
@@ -218,7 +246,7 @@ class InvoiceReceived(db.Model):
     invoice_number = db.Column(db.String(50), nullable=False)
     date_issued = db.Column(db.Date, nullable=False)
     name = db.Column(db.String(50), nullable=True)
-  
+    parent_account = db.Column(db.String(150), nullable=True)
     description = db.Column(db.String(255), nullable=True)
     amount = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to User table
@@ -238,7 +266,7 @@ class InvoiceReceived(db.Model):
         return f'<InvoiceReceived {self.invoice_number}>'
 
 
-# Cash Receipt Journal Model
+
 class CashReceiptJournal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     receipt_date = db.Column(db.Date, nullable=False)

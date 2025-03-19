@@ -2,13 +2,14 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived,Transaction,Estimate
+from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived,Transaction,Estimate,Adjustment
 from functools import wraps
 from werkzeug.security import generate_password_hash
 from flask_mail import Mail, Message
 from datetime import datetime, timedelta
 import random
 import string
+import re
 import  logging
 from datetime import date
 import requests
@@ -759,14 +760,12 @@ def update_delete_customer(id):
 @jwt_required()
 def manage_invoices():
     try:
-        # Get current user identity from JWT (assuming 'id' is available in the JWT payload)
         current_user = get_jwt_identity()
 
         if isinstance(current_user, dict):
-            user_id = current_user.get('id')  # Get the 'id' from the JWT payload
+            user_id = current_user.get('id')
 
         if request.method == 'GET':
-            # Fetch invoices associated with the current user's 'user_id'
             invoices = InvoiceIssued.query.options(joinedload(InvoiceIssued.user)) \
                 .filter_by(user_id=user_id).all()
 
@@ -775,58 +774,53 @@ def manage_invoices():
                 'invoice_number': inv.invoice_number,
                 'date_issued': inv.date_issued.isoformat() if inv.date_issued else None,
                 'amount': inv.amount,
-                'username': inv.user.username,  # Access username from related User model
+                'username': inv.user.username,
                 'account_debited': inv.account_debited,
                 'account_credited': inv.account_credited,
                 'description': inv.description,
-                'name': inv.name,  # Include the 'name' field in the response
-                'manual_number': inv.manual_number  # Include the manual_number in the response
+                'name': inv.name,
+                'manual_number': inv.manual_number,
+                'parent_account': inv.parent_account  # Include parent_account in the response
             } for inv in invoices]), 200
 
         elif request.method == 'POST':
             data = request.get_json()
-            app.logger.info(f"Received data: {data}")  # Log the request payload
+            app.logger.info(f"Received data: {data}")
 
-            # Validate required fields
             if not data.get('invoice_number'):
                 return jsonify({'error': 'Invoice number is required'}), 400
             if not data.get('amount'):
                 return jsonify({'error': 'Amount is required'}), 400
 
-            # Handle date_issued conversion
             date_issued_str = data.get('date_issued')
             try:
                 date_issued = datetime.fromisoformat(date_issued_str) if date_issued_str else None
             except ValueError:
                 return jsonify({'error': 'Invalid date format for date_issued. Use ISO format (YYYY-MM-DD)'}), 400
 
-            # Check for uniqueness of invoice_number per user
             existing_invoice = InvoiceIssued.query.filter_by(user_id=user_id, invoice_number=data['invoice_number']).first()
             if existing_invoice:
                 return jsonify({'error': 'Invoice number already exists for this user'}), 400
 
-            # Validate manual_number if it exists
             manual_number = data.get('manual_number')
-            if manual_number is not None:
-                if not isinstance(manual_number, str):
-                    return jsonify({'error': 'manual_number must be a string'}), 400
+            if manual_number is not None and not isinstance(manual_number, str):
+                return jsonify({'error': 'manual_number must be a string'}), 400
 
-            # Handle account_credited as a list of dictionaries
             account_credited = data.get('account_credited', [])
             if not isinstance(account_credited, list):
                 return jsonify({'error': 'account_credited must be a list of dictionaries'}), 400
 
-            # Create and save the new invoice with the user_id and manual_number
             new_invoice = InvoiceIssued(
                 invoice_number=data['invoice_number'],
                 date_issued=date_issued,
                 amount=float(data['amount']),
                 account_debited=data.get('account_debited'),
-                account_credited=account_credited,  # Store as a list of dictionaries
+                account_credited=account_credited,
                 description=data.get('description'),
-                name=data.get('name'),  # Capture the 'name' field from the request
-                user_id=user_id,  # Use the user_id from the current_user
-                manual_number=manual_number  # Add manual_number from the request
+                name=data.get('name'),
+                user_id=user_id,
+                manual_number=manual_number,
+                parent_account=data.get('parent_account')  # Add parent_account from the request
             )
 
             db.session.add(new_invoice)
@@ -838,48 +832,38 @@ def manage_invoices():
         app.logger.error(f"Error managing invoices: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
 
-    
 @app.route('/invoices/<int:id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_delete_invoice(id):
     try:
-        # Extract current user's identity from JWT (e.g., user_id or username)
-        current_user = get_jwt_identity()  # This should return a dictionary containing user information
+        current_user = get_jwt_identity()
         invoice = InvoiceIssued.query.get_or_404(id)
 
-        # Ensure the invoice belongs to the current user (user_id)
-        if invoice.user_id != current_user['id']:  # Assuming current_user contains user_id
+        if invoice.user_id != current_user['id']:
             return jsonify({'error': 'Unauthorized access to invoice'}), 403
 
         if request.method == 'PUT':
             data = request.get_json()
 
-            # Ensure 'sub_accounts' is provided and is a valid JSON object
-          
-
-            # Ensure 'invoice_type' is provided and valid (if needed)
             if 'invoice_type' in data:
                 invoice.invoice_type = data['invoice_type']
 
-            # Update fields if provided
             if 'invoice_number' in data:
-                # Ensure invoice number is unique
                 existing_invoice = InvoiceIssued.query.filter_by(invoice_number=data['invoice_number']).first()
-                if existing_invoice and existing_invoice.id != id:  # Ensure it's not the same invoice
+                if existing_invoice and existing_invoice.id != id:
                     return jsonify({'error': 'Invoice number already exists'}), 400
                 invoice.invoice_number = data['invoice_number']
 
             if 'date_issued' in data:
                 try:
-                    invoice.date_issued = datetime.strptime(data['date_issued'], '%Y-%m-%d').date()  # Convert to date
+                    invoice.date_issued = datetime.strptime(data['date_issued'], '%Y-%m-%d').date()
                 except ValueError:
                     return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
-            # Update other fields (optional fields)
             invoice.amount = float(data.get('amount', invoice.amount))
             invoice.account_debited = data.get('account_debited', invoice.account_debited)
             invoice.account_credited = data.get('account_credited', invoice.account_credited)
-
+            invoice.parent_account = data.get('parent_account', invoice.parent_account)  # Update parent_account
 
             db.session.commit()
             return jsonify({'message': 'Invoice updated successfully'}), 200
@@ -893,7 +877,6 @@ def update_delete_invoice(id):
         app.logger.error(f"Error processing invoice {id}: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
 
-# Combined GET and POST for /invoice-received
 
 @app.route('/invoice-received', methods=['GET', 'POST'], strict_slashes=False)
 @jwt_required()
@@ -917,6 +900,7 @@ def handle_invoices():
             "account_credited": invoice.account_credited,
             "grn_number": invoice.grn_number,
             "name": invoice.name,
+            "parent_account": invoice.parent_account  # Include parent_account in the response
         } for invoice in invoices]), 200
 
     elif request.method == 'POST':
@@ -935,6 +919,7 @@ def handle_invoices():
                 account_credited=data.get('account_credited'),
                 grn_number=data.get('grn_number'),
                 name=data.get('name'),
+                parent_account=data.get('parent_account')  # Add parent_account from the request
             )
             db.session.add(new_invoice)
             db.session.commit()
@@ -947,7 +932,6 @@ def handle_invoices():
             db.session.rollback()
             return jsonify({"error": f"Database error: {str(e)}"}), 500
 
-# Get a single invoice by ID
 @app.route('/invoice-received/<int:invoice_id>', methods=['GET'])
 @jwt_required()
 def get_invoice(invoice_id):
@@ -971,10 +955,10 @@ def get_invoice(invoice_id):
         "account_debited": invoice.account_debited,
         "account_credited": invoice.account_credited,
         "grn_number": invoice.grn_number,
-        "name": invoice.name,  # Include the 'name' field in the response
+        "name": invoice.name,
+        "parent_account": invoice.parent_account  # Include parent_account in the response
     }), 200
 
-# Update an invoice
 @app.route('/invoice-received/<int:invoice_id>', methods=['PUT'])
 @jwt_required()
 def update_invoice(invoice_id):
@@ -995,7 +979,6 @@ def update_invoice(invoice_id):
 
     try:
         if 'invoice_number' in data:
-            # Ensure invoice number is unique for the user
             existing_invoice = InvoiceReceived.query.filter_by(
                 invoice_number=data['invoice_number'],
                 user_id=user_id
@@ -1023,7 +1006,10 @@ def update_invoice(invoice_id):
             invoice.grn_number = data['grn_number']
 
         if 'name' in data:
-            invoice.name = data['name']  # Update the 'name' field if provided
+            invoice.name = data['name']
+
+        if 'parent_account' in data:
+            invoice.parent_account = data['parent_account']  # Update parent_account if provided
 
         db.session.commit()
         return jsonify({"message": "Invoice updated successfully"}), 200
@@ -1033,7 +1019,6 @@ def update_invoice(invoice_id):
         db.session.rollback()
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
-# Delete an invoice
 @app.route('/invoice-received/<int:invoice_id>', methods=['DELETE'])
 @jwt_required()
 def delete_invoice(invoice_id):
@@ -1055,6 +1040,7 @@ def delete_invoice(invoice_id):
     except RuntimeError as e:
         db.session.rollback()
         return jsonify({"error": f"Database error: {str(e)}"}), 500
+    
     
 @app.route('/last-receipt-number', methods=['GET'])
 def get_last_receipt_number():
@@ -3339,9 +3325,12 @@ def delete_transaction(id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+from flask import jsonify, request, abort
+from datetime import datetime
+
 @app.route('/estimates', methods=['GET'])
 def get_estimates():
-    """Retrieve all estimates."""
+    """Retrieve all estimates with their adjusted values."""
     estimates = Estimate.query.all()
     return jsonify([{
         'id': estimate.id,
@@ -3353,12 +3342,15 @@ def get_estimates():
         'current_estimated_price': estimate.current_estimated_price,
         'total_estimates': estimate.total_estimates,
         'parent_account': estimate.parent_account,
-        'sub_account': estimate.sub_account
+        'sub_account': estimate.sub_account,
+        'adjusted_price': estimate.adjusted_price,
+        'adjusted_quantity': estimate.adjusted_quantity,
+        'adjusted_total_estimates': estimate.adjusted_total_estimates
     } for estimate in estimates])
 
 @app.route('/estimates/<int:id>', methods=['GET'])
 def get_estimate(id):
-    """Retrieve a single estimate by ID."""
+    """Retrieve a single estimate by ID with its adjusted values."""
     estimate = Estimate.query.get_or_404(id)
     return jsonify({
         'id': estimate.id,
@@ -3370,53 +3362,118 @@ def get_estimate(id):
         'current_estimated_price': estimate.current_estimated_price,
         'total_estimates': estimate.total_estimates,
         'parent_account': estimate.parent_account,
-        'sub_account': estimate.sub_account
+        'sub_account': estimate.sub_account,
+        'adjusted_price': estimate.adjusted_price,
+        'adjusted_quantity': estimate.adjusted_quantity,
+        'adjusted_total_estimates': estimate.adjusted_total_estimates
     })
 
-@app.route('/estimates', methods=['POST'])
-def create_estimate():
-    """Create a new estimate."""
+@app.route('/estimates/<int:id>/adjustments', methods=['POST'])
+def create_adjustment(id):
+    """
+    Create an adjustment for a specific estimate.
+    Adjustment types: 'price' or 'quantity'.
+    Adjustment value can be positive or negative.
+    """
+    estimate = Estimate.query.get_or_404(id)
     data = request.get_json()
-    new_estimate = Estimate(
-        department=data['department'],
-        procurement_method=data['procurement_method'],
-        item_specifications=data['item_specifications'],
-        unit_of_measure=data['unit_of_measure'],
-        quantity=data['quantity'],
-        current_estimated_price=data['current_estimated_price'],
-        total_estimates=data['total_estimates'],
-        parent_account=data['parent_account'],
-        sub_account=data['sub_account']
+
+    # Validate required fields
+    if not all(key in data for key in ['adjustment_type', 'adjustment_value']):
+        return jsonify({'error': 'Missing required fields: adjustment_type and adjustment_value'}), 400
+
+    adjustment_type = data['adjustment_type']
+    adjustment_value = data['adjustment_value']
+
+    # Validate adjustment type
+    if adjustment_type not in ['price', 'quantity']:
+        return jsonify({'error': 'Invalid adjustment_type. Must be "price" or "quantity".'}), 400
+
+    # Create the adjustment
+    new_adjustment = Adjustment(
+        estimate_id=estimate.id,
+        adjustment_type=adjustment_type,
+        adjustment_value=adjustment_value,
+        created_at=datetime.utcnow(),
+        created_by=data.get('created_by')  # Optional field
     )
-    db.session.add(new_estimate)
+    db.session.add(new_adjustment)
     db.session.commit()
-    return jsonify({'message': 'Estimate created successfully!'}), 201
+
+    return jsonify({'message': 'Adjustment created successfully!', 'adjustment': {
+        'id': new_adjustment.id,
+        'estimate_id': new_adjustment.estimate_id,
+        'adjustment_type': new_adjustment.adjustment_type,
+        'adjustment_value': new_adjustment.adjustment_value,
+        'created_at': new_adjustment.created_at,
+        'created_by': new_adjustment.created_by
+    }}), 201
+
+@app.route('/estimates/<int:id>/adjustments', methods=['GET'])
+def get_adjustments(id):
+    """Retrieve all adjustments for a specific estimate."""
+    estimate = Estimate.query.get_or_404(id)
+    adjustments = estimate.adjustments  # Access adjustments via relationship
+    return jsonify([{
+        'id': adj.id,
+        'estimate_id': adj.estimate_id,
+        'adjustment_type': adj.adjustment_type,
+        'adjustment_value': adj.adjustment_value,
+        'created_at': adj.created_at,
+        'created_by': adj.created_by
+    } for adj in adjustments])
 
 @app.route('/estimates/<int:id>', methods=['PUT'])
 def update_estimate(id):
-    """Update an existing estimate."""
+    """
+    Update an existing estimate.
+    Only the adjusted_quantity and adjusted_price fields are updated.
+    """
     estimate = Estimate.query.get_or_404(id)
     data = request.get_json()
-    estimate.department = data['department']
-    estimate.procurement_method = data['procurement_method']
-    estimate.item_specifications = data['item_specifications']
-    estimate.unit_of_measure = data['unit_of_measure']
-    estimate.quantity = data['quantity']
-    estimate.current_estimated_price = data['current_estimated_price']
-    estimate.total_estimates = data['total_estimates']
-    estimate.parent_account = data['parent_account']
-    estimate.sub_account = data['sub_account']
-    db.session.commit()
-    return jsonify({'message': 'Estimate updated successfully!'})
 
-@app.route('/estimates/<int:id>', methods=['DELETE'])
-def delete_estimate(id):
-    """Delete an estimate by ID."""
+    # Validate required fields for adjustments
+    if 'adjusted_quantity' not in data and 'adjusted_price' not in data:
+        return jsonify({'error': 'At least one adjustment field is required: adjusted_quantity or adjusted_price'}), 400
+
+    # Update adjusted fields
+    if 'adjusted_quantity' in data:
+        estimate.adjusted_quantity = data['adjusted_quantity']
+    if 'adjusted_price' in data:
+        estimate.adjusted_price = data['adjusted_price']
+
+    # Recalculate adjusted_total_estimates
+    adjusted_quantity = estimate.adjusted_quantity or estimate.quantity
+    adjusted_price = estimate.adjusted_price or estimate.current_estimated_price
+    estimate.adjusted_total_estimates = float(adjusted_quantity) * float(adjusted_price)
+
+    # Commit changes to the database
+    db.session.commit()
+
+    # Return success response
+    return jsonify({
+        'message': 'Estimate updated successfully!',
+        'estimate': estimate.to_dict()
+    }), 200
+    
+    
+    
+@app.route('/estimates/<int:id>/adjustments/<int:adj_id>', methods=['DELETE'])
+def delete_adjustment(id, adj_id):
+    """
+    Delete an adjustment for a specific estimate.
+    """
     estimate = Estimate.query.get_or_404(id)
-    db.session.delete(estimate)
-    db.session.commit()
-    return jsonify({'message': 'Estimate deleted successfully!'})
+    adjustment = Adjustment.query.get_or_404(adj_id)
 
+    # Ensure the adjustment belongs to the specified estimate
+    if adjustment.estimate_id != estimate.id:
+        abort(404, description="Adjustment does not belong to the specified estimate.")
+
+    db.session.delete(adjustment)
+    db.session.commit()
+
+    return jsonify({'message': 'Adjustment deleted successfully!'})
 
 @app.route('/api/transactions', methods=['GET'])
 @jwt_required()
@@ -4179,62 +4236,89 @@ def get_all_revenue():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
+    
+    
+from collections import defaultdict
+from flask import jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+
 @app.route('/trial-balance', methods=['GET'])
 @jwt_required()
 def trial_balance():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
+
     # Initialize a dictionary to hold account balances
     account_balances = defaultdict(lambda: {'debit': 0.0, 'credit': 0.0})
 
-    # Process Transactions
+    # Process Transactions (without user filter)
     for transaction in Transaction.query.all():
-        account_balances[transaction.debited_account_name]['debit'] += transaction.amount_debited
-        account_balances[transaction.credited_account_name]['credit'] += transaction.amount_credited
+        account_balances[transaction.debited_account_name]['debit'] += transaction.amount_debited or 0
+        account_balances[transaction.credited_account_name]['credit'] += transaction.amount_credited or 0
 
     # Process Invoices Issued
-    for invoice in InvoiceIssued.query.all():
-        # Process debited account
+    invoices_issued = InvoiceIssued.query.filter_by(user_id=current_user_id).all()
+    print("Invoices Issued:", invoices_issued)  # Debugging output
+    for invoice in invoices_issued:
+        # Ensure the amount is processed for both credited and debited accounts
         if invoice.account_debited and isinstance(invoice.account_debited, str):
-            account_balances[invoice.account_debited]['debit'] += invoice.amount
+            debit_amount = invoice.amount or 0  # Default to 0 if None
+            account_balances[invoice.account_debited]['debit'] += debit_amount
+            print(f"Debited {debit_amount} to {invoice.account_debited}")  # Debugging output
 
-        # Process credited accounts (list of dictionaries)
         if invoice.account_credited and isinstance(invoice.account_credited, list):
             for credited_entry in invoice.account_credited:
                 if isinstance(credited_entry, dict) and 'name' in credited_entry and 'amount' in credited_entry:
                     account_name = credited_entry['name']
-                    amount = credited_entry['amount']
+                    amount = credited_entry['amount'] or 0  # Default to 0 if None
                     if isinstance(amount, (int, float)):
+                        # Apply the credited amount to the credited account
                         account_balances[account_name]['credit'] += amount
+                        print(f"Credited {amount} to {account_name}")  # Debugging output
+                        
+                        # Mirror the credited amount to the debited account
+                        if invoice.account_debited and isinstance(invoice.account_debited, str):
+                            account_balances[invoice.account_debited]['debit'] += amount
+                            print(f"Mirrored Credited {amount} to Debited {invoice.account_debited}")  # Debugging output
 
     # Process Invoices Received
-    for invoice in InvoiceReceived.query.all():
-        # Process credited account
+    invoices_received = InvoiceReceived.query.filter_by(user_id=current_user_id).all()
+    print("Invoices Received:", invoices_received)  # Debugging output
+    for invoice in invoices_received:
+        # Ensure the amount is processed for both credited and debited accounts
         if invoice.account_credited and isinstance(invoice.account_credited, str):
-            account_balances[invoice.account_credited]['credit'] += invoice.amount
+            credit_amount = invoice.amount or 0  # Default to 0 if None
+            account_balances[invoice.account_credited]['credit'] += credit_amount
+            print(f"Credited {credit_amount} to {invoice.account_credited}")  # Debugging output
 
-        # Process debited accounts (list of dictionaries)
         if invoice.account_debited and isinstance(invoice.account_debited, list):
             for debited_entry in invoice.account_debited:
                 if isinstance(debited_entry, dict) and 'name' in debited_entry and 'amount' in debited_entry:
                     account_name = debited_entry['name']
-                    amount = debited_entry['amount']
+                    amount = debited_entry['amount'] or 0  # Default to 0 if None
                     if isinstance(amount, (int, float)):
+                        # Apply the debited amount to the debited account
                         account_balances[account_name]['debit'] += amount
+                        print(f"Debited {amount} to {account_name}")  # Debugging output
+                        
+                        # Mirror the debited amount to the credited account
+                        if invoice.account_credited and isinstance(invoice.account_credited, str):
+                            account_balances[invoice.account_credited]['credit'] += amount
+                            print(f"Mirrored Debited {amount} to Credited {invoice.account_credited}")  # Debugging output
 
-    # Process Cash Receipt Journals
+    # Process Cash Receipt Journals (without user filter)
     for receipt in CashReceiptJournal.query.all():
         if receipt.account_debited:
-            account_balances[receipt.account_debited]['debit'] += receipt.total
+            account_balances[receipt.account_debited]['debit'] += receipt.total or 0
         if receipt.account_credited:
-            account_balances[receipt.account_credited]['credit'] += receipt.total
+            account_balances[receipt.account_credited]['credit'] += receipt.total or 0
 
-    # Process Cash Disbursement Journals
+    # Process Cash Disbursement Journals (without user filter)
     for disbursement in CashDisbursementJournal.query.all():
         if disbursement.account_debited:
-            account_balances[disbursement.account_debited]['debit'] += disbursement.total
+            account_balances[disbursement.account_debited]['debit'] += disbursement.total or 0
         if disbursement.account_credited:
-            account_balances[disbursement.account_credited]['credit'] += disbursement.total
+            account_balances[disbursement.account_credited]['credit'] += disbursement.total or 0
 
     # Generate Trial Balance
     trial_balance_data = []
@@ -4250,10 +4334,6 @@ def trial_balance():
 
     # Return JSON response
     return jsonify(trial_balance_data)
-
-
-
-
 
 
 
@@ -4731,165 +4811,327 @@ def extract_account_code(account):
 
 
 
+# Classification mapping for parent account code ranges
+CASH_FLOW_CATEGORIES = {
+    'Operating Activities': range(4000, 10000),  # 4000-9999
+    'Investing Activities': range(1300, 10000),  # 1300-9999
+    'Financing Activities': range(2650, 2651)    # 2650 (specific account)
+}
 
+# Function to classify cash flow based on parent account
+def get_cash_flow_category(parent_account):
+    # Extract numeric part of parent_account if possible (e.g., '1000-Cash & Cash Equivalent' -> '1000')
+    numeric_part = re.match(r"(\d+)", parent_account)  # Match digits at the beginning of the string
+    
+    if numeric_part:
+        parent_account_number = int(numeric_part.group(1))  # Extract numeric part and convert to int
+    else:
+        # If no numeric part, return None to indicate no match
+        return None
 
+    # Iterate through the categories and check if the parent_account falls within the range
+    for category, account_range in CASH_FLOW_CATEGORIES.items():
+        if parent_account_number in account_range:
+            return category
 
-@app.route('/cash_flow_statement', methods=['GET'])
-@jwt_required()
+    # If no match found, return None (no classification)
+    return None
+
+@app.route('/cash-flow', methods=['GET'])
 def get_cash_flow_statement():
-    current_user = get_jwt_identity()
-    current_user_id = current_user.get('id')
-
-  
-    cash_receipts = db.session.query(CashReceiptJournal).all()
-    cash_disbursements = db.session.query(CashDisbursementJournal).all()
-
-    # Retrieve all accounts once to optimize performance
-    all_accounts = ChartOfAccounts.query.all()
-
-    # Function to get parent account details and account names based on account code
-    def get_parent_account_details(account_code):
-        """Get the parent account details and account names based on account code."""
-        if account_code:
-            account_code_str = str(account_code)
-            for acc in all_accounts:
-                for subaccount in acc.sub_account_details:
-                    if account_code_str in subaccount.get('name', ''):
-                        # Return detailed account information including account names
-                        return {
-                            "parent_account": acc.parent_account,
-                            "account_name": acc.account_name,
-                            "account_type": acc.account_type,
-                            "note_number": acc.note_number,
-                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
-                        }
-            return {}  # Return empty dictionary if no parent account is found
-        return {}  # Return empty dictionary if no account code is provided
-
-    # Combine all transactions into a single list
-    all_transactions = (
-         cash_receipts + cash_disbursements 
-    )
-
-    # Initialize account_groups with all accounts in the range 400-599
-    account_groups = defaultdict(lambda: {
-        "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
-        "relevant_accounts": set(),  # Store relevant sub-accounts
-        "total_amount": 0.0  # Total amount for the account group
-    })
-
-    # Fetch all accounts in the range 400-599 and initialize them
-    for acc in all_accounts:
-        if acc.account_name and acc.account_name.split('-')[0].isdigit():
-            account_number = int(acc.account_name.split('-')[0])
-            if 400 <= account_number <= 599:
-                # Initialize the account group if it doesn't exist
-                if acc.account_name not in account_groups:
-                    account_groups[acc.account_name] = {
-                        "parent_accounts": {},
-                        "relevant_accounts": set(),
-                        "total_amount": 0.0
-                    }
-
-                # Initialize parent accounts for the account group
-                for subaccount in acc.sub_account_details:
-                    parent_account = subaccount.get('name', '')
-                    if parent_account:
-                        account_groups[acc.account_name]["parent_accounts"][parent_account] = {
-                            "amount": 0.0,
-                            "note_number": acc.note_number  # Include note number for the parent account
-                        }
-
-    # Process transactions and update amounts for accounts with transactions
-    for transaction in all_transactions:
-        # Initialize variables for amount, debited_account, and credited_account
-        amount = 0.0
-        debited_account = None
-        credited_account = None
-
-        if isinstance(transaction, CashReceiptJournal):
-            amount = transaction.total
-            debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
-        elif isinstance(transaction, CashDisbursementJournal):
-            amount = transaction.total
-            debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
-        
-            continue  # Skip any unsupported transaction type
-
-        # Round amount to two decimal places to avoid floating-point issues
-        amount = round(amount, 2)
-
-        # Get parent account details for debited and credited accounts
-        parent_debited = get_parent_account_details(debited_account)
-        parent_credited = get_parent_account_details(credited_account)
-
-        # Function to check if the account name is within the range 400-599
-        def is_account_in_range(account_name):
-            """Check if the account name starts with a number between 400 and 599."""
-            if account_name and account_name.split('-')[0].isdigit():
-                account_number = int(account_name.split('-')[0])
-                return 1 <= account_number <= 999
-            return False
-
-      
-        if parent_debited and parent_debited.get("account_name"):
-            account_name = parent_debited.get("account_name")
-            if is_account_in_range(account_name):  
-                parent_account = parent_debited.get("parent_account")
-                sub_account_name = parent_debited.get("sub_account_name")
-                note_number = parent_debited.get("note_number")
-
-                # Initialize parent account amount if it doesn't exist
-                if parent_account not in account_groups[account_name]["parent_accounts"]:
-                    account_groups[account_name]["parent_accounts"][parent_account] = {
-                        "amount": 0.0,
-                        "note_number": note_number
-                    }
-
-                # Add amount to the parent account
-                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
-                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["total_amount"] += amount
-
-        # Handle credited account information
-        if parent_credited and parent_credited.get("account_name"):
-            account_name = parent_credited.get("account_name")
-            if is_account_in_range(account_name):  # Only process if account is in range 400-599
-                parent_account = parent_credited.get("parent_account")
-                sub_account_name = parent_credited.get("sub_account_name")
-                note_number = parent_credited.get("note_number")
-
-                # Initialize parent account amount if it doesn't exist
-                if parent_account not in account_groups[account_name]["parent_accounts"]:
-                    account_groups[account_name]["parent_accounts"][parent_account] = {
-                        "amount": 0.0,
-                        "note_number": note_number
-                    }
-
-                # Add amount to the parent account
-                account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
-                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["total_amount"] += amount
-
-    # Convert defaultdict to a regular dictionary for JSON serialization
-    account_groups = {
-        account_name: {
-            "parent_accounts": {
-                parent_account: {
-                    "amount": data["amount"],
-                    "note_number": data["note_number"]
-                }
-                for parent_account, data in account_data["parent_accounts"].items()
-            },
-            "relevant_accounts": list(account_data["relevant_accounts"]),
-            "total_amount": round(account_data["total_amount"], 2)
-        }
-        for account_name, account_data in account_groups.items()
+    # Initialize the results for each category, excluding 'Other Activities'
+    cash_flow = {
+        'Operating Activities': [],
+        'Investing Activities': [],
+        'Financing Activities': []
     }
 
-    return jsonify(account_groups)
+    # Query for Cash Receipt Journal (Inflows)
+    inflows = db.session.query(
+        CashReceiptJournal.parent_account,
+        func.sum(CashReceiptJournal.cash).label('total_cash'),
+        func.sum(CashReceiptJournal.bank).label('total_bank')
+    ).group_by(CashReceiptJournal.parent_account).all()
+
+    # Query for Cash Disbursement Journal (Outflows)
+    outflows = db.session.query(
+        CashDisbursementJournal.parent_account,
+        func.sum(CashDisbursementJournal.cash).label('total_cash'),
+        func.sum(CashDisbursementJournal.bank).label('total_bank')
+    ).group_by(CashDisbursementJournal.parent_account).all()
+
+    # Processing inflows
+    for inflow in inflows:
+        parent_account = inflow.parent_account  # This is a string like '1000-Cash & Cash Equivalent'
+        category = get_cash_flow_category(parent_account)  # Get the category based on parent_account
+
+        # Skip if the category is None (i.e., not a valid category)
+        if category is None:
+            continue
+
+        # Default to zero if no inflow exists
+        total_cash_inflow = inflow.total_cash if inflow.total_cash else 0
+        total_bank_inflow = inflow.total_bank if inflow.total_bank else 0
+
+        # Add to the appropriate category
+        cash_flow[category].append({
+            'parent_account': inflow.parent_account,
+            'inflow_cash': total_cash_inflow,
+            'inflow_bank': total_bank_inflow,
+            'outflow_cash': 0,
+            'outflow_bank': 0,
+            'net_cash_flow': total_cash_inflow,
+            'net_bank_flow': total_bank_inflow
+        })
+
+    # Processing outflows
+    for outflow in outflows:
+        parent_account = outflow.parent_account  # This is a string like '1000-Cash & Cash Equivalent'
+        category = get_cash_flow_category(parent_account)  # Get the category based on parent_account
+
+        # Skip if the category is None (i.e., not a valid category)
+        if category is None:
+            continue
+
+        # Default to zero if no outflow exists
+        total_cash_outflow = outflow.total_cash if outflow.total_cash else 0
+        total_bank_outflow = outflow.total_bank if outflow.total_bank else 0
+
+        # Add or update in the appropriate category
+        found = False
+        for inflow in cash_flow[category]:
+            if inflow['parent_account'] == outflow.parent_account:
+                inflow['outflow_cash'] = total_cash_outflow
+                inflow['outflow_bank'] = total_bank_outflow
+                inflow['net_cash_flow'] -= total_cash_outflow
+                inflow['net_bank_flow'] -= total_bank_outflow
+                found = True
+                break
+        
+        if not found:
+            cash_flow[category].append({
+                'parent_account': outflow.parent_account,
+                'inflow_cash': 0,
+                'inflow_bank': 0,
+                'outflow_cash': total_cash_outflow,
+                'outflow_bank': total_bank_outflow,
+                'net_cash_flow': -total_cash_outflow,
+                'net_bank_flow': -total_bank_outflow
+            })
+
+    # Ensure the result is in the order defined by CASH_FLOW_CATEGORIES
+    ordered_cash_flow = {
+        'Operating Activities': cash_flow['Operating Activities'],
+        'Investing Activities': cash_flow['Investing Activities'],
+        'Financing Activities': cash_flow['Financing Activities']
+    }
+
+    # Return the cash flow statement as a JSON response
+    return jsonify(ordered_cash_flow)
+
+@app.route('/departmental-budget', methods=['GET'])
+def departmental_budget():
+    # Query the departmental budgets
+    departmental_budget = db.session.query(
+        Estimate.department,
+        db.func.sum(Estimate.total_estimates).label('total_budget'),
+        db.func.sum(Estimate.adjusted_total_estimates).label('adjusted_total_budget')
+    ).group_by(Estimate.department).all()
+
+    # Format the results with both estimated and adjusted total amounts
+    report_data = [
+        {
+            'department': row.department,
+            'total_budget': float(row.total_budget),
+            'adjusted_total_budget': float(row.adjusted_total_budget) if row.adjusted_total_budget is not None else 0.0
+        }
+        for row in departmental_budget
+    ]
+
+    return jsonify(report_data)
+
+
+@app.route('/consolidated-budget', methods=['GET'])
+def consolidated_budget():
+    # Query the database to fetch all estimates
+    estimates = db.session.query(
+        Estimate.parent_account,
+        Estimate.total_estimates,
+        Estimate.quantity,
+        Estimate.current_estimated_price,
+        Estimate.adjusted_quantity,
+        Estimate.adjusted_price
+    ).all()
+
+    # Initialize variables for categorization
+    capital_budget = {"total_original": 0.0, "total_adjusted": 0.0, "accounts": {}}
+    receipts = {"total_original": 0.0, "total_adjusted": 0.0, "accounts": {}}
+    payments = {"total_original": 0.0, "total_adjusted": 0.0, "accounts": {}}
+
+    # Process each estimate and calculate original/adjusted totals
+    for estimate in estimates:
+        parent_account = estimate.parent_account
+        original_total = float(estimate.total_estimates)
+
+        # Calculate adjusted total using adjusted quantity and price
+        adjusted_total = (estimate.adjusted_quantity or estimate.quantity) * (estimate.adjusted_price or estimate.current_estimated_price)
+
+        # Categorize the parent account
+        if parent_account.startswith(("14", "15", "16", "17", "18", "19")):  # Capital Budget (1400-1999)
+            category = capital_budget
+        elif parent_account.startswith("4"):  # Receipts (4000-4999)
+            category = receipts
+        elif parent_account.startswith(("5", "6", "7", "8", "9")):  # Payments (5000-9999)
+            category = payments
+        else:
+            continue
+
+        # Update totals for the category
+        category["total_original"] += original_total
+        category["total_adjusted"] += adjusted_total
+
+        # Update account-level details
+        if parent_account not in category["accounts"]:
+            category["accounts"][parent_account] = {
+                "original_total": 0.0,
+                "adjusted_total": 0.0
+            }
+        category["accounts"][parent_account]["original_total"] += original_total
+        category["accounts"][parent_account]["adjusted_total"] += adjusted_total
+
+    # Convert account dictionaries to lists
+    def process_accounts(category):
+        category["accounts"] = [
+            {"parent_account": acc, "original_total": vals["original_total"], "adjusted_total": vals["adjusted_total"]}
+            for acc, vals in category["accounts"].items()
+        ]
+
+    process_accounts(capital_budget)
+    process_accounts(receipts)
+    process_accounts(payments)
+
+    # Calculate surplus/deficit (Receipts - Payments) for both original and adjusted values
+    original_surplus_deficit = receipts["total_original"] - payments["total_original"]
+    adjusted_surplus_deficit = receipts["total_adjusted"] - payments["total_adjusted"]
+
+    # Format the results into a structured dictionary
+    report_data = {
+        "capital_budget": capital_budget,
+        "receipts": receipts,
+        "payments": payments,
+        "surplus_deficit": {
+            "original_total": original_surplus_deficit,
+            "adjusted_total": adjusted_surplus_deficit
+        }
+    }
+
+    return jsonify(report_data)
+
+
+import logging
+from sqlalchemy import or_, func
+from flask import jsonify
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+
+@app.route('/budget-vs-actuals', methods=['GET'])
+def budget_vs_actuals():
+    # Define valid parent account prefixes (updated to include all relevant prefixes)
+    valid_prefixes = ('4300', '4400', '4050', '7500', '1400', '4500', '1000')
+
+    # Step 1: Query original and adjusted budgets from the Estimate table
+    estimates = db.session.query(
+        Estimate.parent_account,
+        Estimate.total_estimates.label('original_budget'),
+        Estimate.adjusted_total_estimates.label('adjusted_budget')
+    ).filter(
+        or_(*[Estimate.parent_account.startswith(prefix) for prefix in valid_prefixes])
+    ).all()
+
+    # Normalize parent_account values for comparison
+    def normalize_parent_account(account):
+        if account:
+            return account.split('-')[0].strip()[:4]  # Extract numeric prefix
+        return None
+
+    # Log estimates data
+    logging.debug("Estimates Data:")
+    for estimate in estimates:
+        logging.debug(f"Parent Account: {estimate.parent_account}, Original Budget: {estimate.original_budget}")
+
+    # Step 2: Query raw data from InvoiceIssued, InvoiceReceived, CashReceiptJournal, and CashDisbursementJournal
+    raw_data = db.session.query(
+        func.coalesce(InvoiceIssued.parent_account, InvoiceReceived.parent_account,
+                      CashReceiptJournal.parent_account, CashDisbursementJournal.parent_account).label('parent_account'),
+        (func.coalesce(InvoiceIssued.amount, 0) +
+         func.coalesce(InvoiceReceived.amount, 0) +
+         func.coalesce(CashReceiptJournal.total, 0) +
+         func.coalesce(CashDisbursementJournal.total, 0)).label('amount')
+    ).outerjoin(
+        InvoiceReceived, InvoiceIssued.parent_account == InvoiceReceived.parent_account
+    ).outerjoin(
+        CashReceiptJournal, InvoiceIssued.parent_account == CashReceiptJournal.parent_account
+    ).outerjoin(
+        CashDisbursementJournal, InvoiceIssued.parent_account == CashDisbursementJournal.parent_account
+    ).filter(
+        or_(
+            InvoiceIssued.parent_account != None,
+            InvoiceReceived.parent_account != None,
+            CashReceiptJournal.parent_account != None,
+            CashDisbursementJournal.parent_account != None
+        )
+    ).all()
+
+    # Normalize raw data and aggregate by parent account prefix
+    actuals_dict = {}
+    logging.debug("Raw Data and Normalized Prefixes:")
+    for row in raw_data:
+        parent_account = row.parent_account
+        amount = float(row.amount)  # Access the 'amount' column
+        normalized_prefix = normalize_parent_account(parent_account)
+        logging.debug(f"Parent Account: {parent_account}, Normalized Prefix: {normalized_prefix}, Amount: {amount}")
+        
+        # Check if the normalized prefix is valid and the amount is non-zero
+        if normalized_prefix in valid_prefixes and amount != 0:
+            logging.debug(f"Including Prefix: {normalized_prefix}, Amount: {amount}")
+            actuals_dict[normalized_prefix] = actuals_dict.get(normalized_prefix, 0.0) + amount
+        else:
+            logging.debug(f"Excluding Prefix: {normalized_prefix}, Amount: {amount}")
+
+    # Log aggregated results
+    logging.debug("Aggregated Actuals Data:")
+    for prefix, amount in actuals_dict.items():
+        logging.debug(f"Parent Account Prefix: {prefix}, Actual Amount: {amount}")
+
+    # Step 3: Prepare the final report
+    report_data = []
+    for estimate in estimates:
+        parent_account = estimate.parent_account
+        normalized_parent_account = normalize_parent_account(parent_account)  # Normalize parent account
+        original_budget = float(estimate.original_budget)
+        adjusted_budget = float(estimate.adjusted_budget or 0.0)
+        final_budget = original_budget + adjusted_budget
+        actual_amount = actuals_dict.get(normalized_parent_account, 0.0)
+
+        # Calculate performance difference and utilization difference
+        performance_difference = final_budget - actual_amount
+        utilization_difference = round((performance_difference / final_budget) * 100, 2) if final_budget > 0 else 0.0
+
+        # Append the data to the report
+        report_data.append({
+            'parent_account': parent_account,
+            'original_budget': original_budget,
+            'adjusted_budget': adjusted_budget,
+            'final_budget': final_budget,
+            'actual_amount': actual_amount,
+            'performance_difference': performance_difference,
+            'utilization_difference': utilization_difference
+        })
+
+    # Return the report data as a JSON response
+    return jsonify(report_data)
+
 
 
 if __name__ == '__main__':
