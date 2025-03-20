@@ -4238,9 +4238,7 @@ def get_all_revenue():
     
     
     
-from collections import defaultdict
-from flask import jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
+
 
 @app.route('/trial-balance', methods=['GET'])
 @jwt_required()
@@ -4338,132 +4336,6 @@ def trial_balance():
 
 
 
-@app.route('/transactions/accounts', methods=['GET'])
-@jwt_required()
-def get_accounts_debited_credited():
-    current_user = get_jwt_identity()
-    current_user_id = current_user.get('id')
-
-    # Query all transactions from each model
-    invoices_issued = db.session.query(InvoiceIssued).all()
-    invoices_received = db.session.query(InvoiceReceived).all()
-    cash_receipts = db.session.query(CashReceiptJournal).all()
-    cash_disbursements = db.session.query(CashDisbursementJournal).all()
-    transactions = db.session.query(Transaction).all()  # Include the Transaction model
-
-    # Retrieve all accounts once to optimize performance
-    accounts = ChartOfAccounts.query.all()
-
-    # Function to get parent account details based on account code
-    def get_parent_account_details(account_code):
-        """Get the parent account details based on account code."""
-        if account_code:
-            account_code_str = str(account_code)
-            for acc in accounts:
-                for subaccount in acc.sub_account_details:
-                    if account_code_str in subaccount.get('name', ''):
-                        # Return detailed account information
-                        return {
-                            "parent_account": acc.parent_account,
-                            "account_name": acc.account_name,
-                            "account_type": acc.account_type,
-                            "note_number": acc.note_number
-                        }
-            return {}  # Return empty dictionary if no parent account is found
-        return {}  # Return empty dictionary if no account code is provided
-
-    # Combine all transactions into a single list
-    all_transactions = (
-        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
-    )
-
-    # Group transactions by note number
-    note_groups = defaultdict(lambda: {
-        "parent_account": None,
-        "relevant_accounts": set(),
-        "amounts": [],  # List to store individual amounts
-        "total_amount": 0.0
-    })
-
-    for transaction in all_transactions:
-        # Determine the amount and account names based on the transaction type
-        if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
-            amount = transaction.amount
-            debited_account = transaction.account_debited
-            credited_accounts = transaction.account_credited
-        elif isinstance(transaction, CashReceiptJournal):
-            amount = transaction.total
-            debited_account = transaction.account_debited
-            credited_accounts = transaction.account_credited
-        elif isinstance(transaction, CashDisbursementJournal):
-            amount = transaction.total
-            debited_account = transaction.account_debited
-            credited_accounts = transaction.account_credited
-        elif isinstance(transaction, Transaction):  # Handle the Transaction model
-            amount = transaction.amount_debited
-            debited_account = transaction.debited_account_name
-            credited_accounts = transaction.credited_account_name
-        else:
-            continue  # Skip if the amount cannot be determined
-
-        # Log the details of the invoice
-        logging.info(f"Processing Invoice: {transaction.id}")
-        logging.info(f"Debited Account: {debited_account}")
-        logging.info(f"Credited Accounts: {credited_accounts}")
-
-        # Extract account code if the account is a JSON object
-        if isinstance(debited_account, dict):
-            debited_account = debited_account.get('account_code', debited_account)
-
-        # Handle credited accounts as a list of dictionaries
-        if isinstance(credited_accounts, list):
-            for credited_account in credited_accounts:
-                if isinstance(credited_account, dict):
-                    credited_account_code = credited_account.get('name')
-                    credited_amount = credited_account.get('amount', 0)
-
-                    # Log the extracted credited account code and amount
-                    logging.info(f"Extracted Credited Account Code: {credited_account_code}")
-                    logging.info(f"Extracted Credited Amount: {credited_amount}")
-
-                    # Get parent account details for credited account
-                    parent_credited = get_parent_account_details(credited_account_code)
-
-                    # Determine the note number and parent account for the credited account
-                    if parent_credited and parent_credited.get("note_number"):
-                        note_number = parent_credited.get("note_number")
-                        parent_account = parent_credited.get("parent_account")
-                        note_groups[note_number]["parent_account"] = parent_account
-                        note_groups[note_number]["relevant_accounts"].add(credited_account_code)
-                        note_groups[note_number]["amounts"].append(credited_amount)  # Add individual amount
-                        note_groups[note_number]["total_amount"] += credited_amount
-
-        # Get parent account details for debited account
-        parent_debited = get_parent_account_details(debited_account)
-
-        # Determine the note number and parent account for the debited account
-        if parent_debited and parent_debited.get("note_number"):
-            note_number = parent_debited.get("note_number")
-            parent_account = parent_debited.get("parent_account")
-            note_groups[note_number]["parent_account"] = parent_account
-            note_groups[note_number]["relevant_accounts"].add(debited_account)
-            note_groups[note_number]["amounts"].append(amount)  # Add individual amount
-            note_groups[note_number]["total_amount"] += amount
-
-    # Convert defaultdict to a regular dictionary for JSON serialization
-    note_groups = {
-        note: {
-            "parent_account": data["parent_account"],
-            "relevant_accounts": list(data["relevant_accounts"]),
-            "amounts": data["amounts"],  # Include individual amounts
-            "total_amount": round(data["total_amount"], 2)  # Round total amount
-        }
-        for note, data in note_groups.items() if data["relevant_accounts"]
-    }
-
-    return jsonify(note_groups)
-
-
 
 
 @app.route('/income-statement/accounts', methods=['GET'])
@@ -4479,27 +4351,37 @@ def get_income_accounts_debited_credited():
     cash_disbursements = db.session.query(CashDisbursementJournal).all()
     transactions = db.session.query(Transaction).all()  # Include the Transaction model
 
+    # Debugging: Check the number of transactions fetched
+    print(f"Invoices Issued: {len(invoices_issued)}")
+    print(f"Invoices Received: {len(invoices_received)}")
+    print(f"Cash Receipts: {len(cash_receipts)}")
+    print(f"Cash Disbursements: {len(cash_disbursements)}")
+    print(f"Transactions: {len(transactions)}")
+
     # Retrieve all accounts once to optimize performance
     all_accounts = ChartOfAccounts.query.all()
 
     # Function to get parent account details and account names based on account code
     def get_parent_account_details(account_code):
         """Get the parent account details and account names based on account code."""
+        if isinstance(account_code, dict):  # Handle JSON object
+            account_code = account_code.get('name', '')
+        elif isinstance(account_code, list):  # Handle JSON array
+            account_code = account_code[0].get('name', '') if account_code else ''
+
         if account_code:
             account_code_str = str(account_code)
             for acc in all_accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
-                        # Return detailed account information including account names
                         return {
                             "parent_account": acc.parent_account,
                             "account_name": acc.account_name,
                             "account_type": acc.account_type,
                             "note_number": acc.note_number,
-                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
+                            "sub_account_name": subaccount.get('name', '')
                         }
-            return {}  # Return empty dictionary if no parent account is found
-        return {}  # Return empty dictionary if no account code is provided
+        return {}  # Return empty dictionary if no parent account is found
 
     # Combine all transactions into a single list
     all_transactions = (
@@ -4510,7 +4392,8 @@ def get_income_accounts_debited_credited():
     account_groups = defaultdict(lambda: {
         "parent_accounts": {},  # Store parent accounts and their individual amounts and notes
         "relevant_accounts": set(),  # Store relevant sub-accounts
-        "total_amount": 0.0  # Total amount for the account group
+        "total_amount": 0.0,  # Total amount for the account group
+        "account_type": None  # Add account type to the group
     })
 
     # Fetch all accounts in the range 400-599 and initialize them
@@ -4523,9 +4406,9 @@ def get_income_accounts_debited_credited():
                     account_groups[acc.account_name] = {
                         "parent_accounts": {},
                         "relevant_accounts": set(),
-                        "total_amount": 0.0
+                        "total_amount": 0.0,
+                        "account_type": acc.account_type  # Include account type here
                     }
-
                 # Initialize parent accounts for the account group
                 for subaccount in acc.sub_account_details:
                     parent_account = subaccount.get('name', '')
@@ -4573,6 +4456,12 @@ def get_income_accounts_debited_credited():
         parent_debited = get_parent_account_details(debited_account)
         parent_credited = get_parent_account_details(credited_account)
 
+        # Debugging: Check the transaction details
+        print(f"Transaction: {transaction}")
+        print(f"Amount: {amount}")
+        print(f"Debited Account: {debited_account}, Parent: {parent_debited}")
+        print(f"Credited Account: {credited_account}, Parent: {parent_credited}")
+
         # Function to check if the account name is within the range 400-599
         def is_account_in_range(account_name):
             """Check if the account name starts with a number between 400 and 599."""
@@ -4588,14 +4477,12 @@ def get_income_accounts_debited_credited():
                 parent_account = parent_debited.get("parent_account")
                 sub_account_name = parent_debited.get("sub_account_name")
                 note_number = parent_debited.get("note_number")
-
                 # Initialize parent account amount if it doesn't exist
                 if parent_account not in account_groups[account_name]["parent_accounts"]:
                     account_groups[account_name]["parent_accounts"][parent_account] = {
                         "amount": 0.0,
                         "note_number": note_number
                     }
-
                 # Add amount to the parent account
                 account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
@@ -4608,18 +4495,39 @@ def get_income_accounts_debited_credited():
                 parent_account = parent_credited.get("parent_account")
                 sub_account_name = parent_credited.get("sub_account_name")
                 note_number = parent_credited.get("note_number")
-
                 # Initialize parent account amount if it doesn't exist
                 if parent_account not in account_groups[account_name]["parent_accounts"]:
                     account_groups[account_name]["parent_accounts"][parent_account] = {
                         "amount": 0.0,
                         "note_number": note_number
                     }
-
                 # Add amount to the parent account
                 account_groups[account_name]["parent_accounts"][parent_account]["amount"] += amount
                 account_groups[account_name]["relevant_accounts"].add(sub_account_name)
                 account_groups[account_name]["total_amount"] += amount
+
+        # Handle credited account information for InvoiceIssued where credited_account is a list
+        if isinstance(transaction, InvoiceIssued) and isinstance(credited_account, list):
+            for credit in credited_account:
+                credit_name = credit.get('name')
+                credit_amount = credit.get('amount', 0.0)
+                parent_credited = get_parent_account_details(credit_name)
+                if parent_credited and parent_credited.get("account_name"):
+                    account_name = parent_credited.get("account_name")
+                    if is_account_in_range(account_name):  # Only process if account is in range 400-599
+                        parent_account = parent_credited.get("parent_account")
+                        sub_account_name = parent_credited.get("sub_account_name")
+                        note_number = parent_credited.get("note_number")
+                        # Initialize parent account amount if it doesn't exist
+                        if parent_account not in account_groups[account_name]["parent_accounts"]:
+                            account_groups[account_name]["parent_accounts"][parent_account] = {
+                                "amount": 0.0,
+                                "note_number": note_number
+                            }
+                        # Add amount to the parent account
+                        account_groups[account_name]["parent_accounts"][parent_account]["amount"] += credit_amount
+                        account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                        account_groups[account_name]["total_amount"] += credit_amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
     account_groups = {
@@ -4632,16 +4540,24 @@ def get_income_accounts_debited_credited():
                 for parent_account, data in account_data["parent_accounts"].items()
             },
             "relevant_accounts": list(account_data["relevant_accounts"]),
-            "total_amount": round(account_data["total_amount"], 2)
+            "total_amount": round(account_data["total_amount"], 2),
+            "account_type": account_data["account_type"]  # Include account type in the response
         }
         for account_name, account_data in account_groups.items()
     }
 
+    # Debugging: Check the final account groups
+    print(f"Account Groups: {account_groups}")
     return jsonify(account_groups)
 
-@app.route('/balance-statement/accounts', methods=['GET'])
+
+
+
+
+
+@app.route('/transactions/accounts', methods=['GET'])
 @jwt_required()
-def get_balance_accounts_debited_credited():
+def get_accounts():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
@@ -4653,23 +4569,22 @@ def get_balance_accounts_debited_credited():
     transactions = db.session.query(Transaction).all()  # Include the Transaction model
 
     # Retrieve all accounts once to optimize performance
-    all_accounts = ChartOfAccounts.query.all()
+    accounts = ChartOfAccounts.query.all()
 
-    # Function to get parent account details and account names based on account code
+    # Function to get parent account details based on account code
     def get_parent_account_details(account_code):
-        """Get the parent account details and account names based on account code."""
+        """Get the parent account details based on account code."""
         if account_code:
             account_code_str = str(account_code)
-            for acc in all_accounts:
+            for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
-                        # Return detailed account information including account names
+                        # Return detailed account information
                         return {
                             "parent_account": acc.parent_account,
                             "account_name": acc.account_name,
                             "account_type": acc.account_type,
-                            "note_number": acc.note_number,
-                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
+                            "note_number": acc.note_number
                         }
             return {}  # Return empty dictionary if no parent account is found
         return {}  # Return empty dictionary if no account code is provided
@@ -4679,108 +4594,138 @@ def get_balance_accounts_debited_credited():
         invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
     )
 
-    # Group transactions by account name (e.g., 100-Current Assets)
-    account_groups = defaultdict(lambda: {
-        "parent_accounts": {},  # Store parent accounts and their individual amounts
-        "relevant_accounts": set(),  # Store relevant sub-accounts
-        "notes": set(),  # Store note numbers
-        "total_amount": 0.0  # Total amount for the account group
+    # Group transactions by note number
+    note_groups = defaultdict(lambda: {
+        "parent_account": None,
+        "relevant_accounts": set(),
+        "amounts": [],  # List to store individual amounts
+        "total_amount": 0.0
     })
 
     for transaction in all_transactions:
-        # Initialize variables for amount, debited_account, and credited_account
-        amount = 0.0
+        # Initialize variables
+        amount = 0
         debited_account = None
-        credited_account = None
+        credited_accounts = []
 
-        # Process different transaction types
-        if isinstance(transaction, InvoiceIssued):
-            amount = transaction.amount
-            debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
-        elif isinstance(transaction, InvoiceReceived):
-            amount = transaction.amount
-            debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
+        # Determine the amount and account names based on the transaction type
+        if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
+            # Extract debited and credited accounts
+            if isinstance(transaction, InvoiceIssued):
+                # For InvoiceIssued, account_debited is a string, account_credited is JSON (list of accounts)
+                debited_account = transaction.account_debited
+                credited_accounts = transaction.account_credited or []  # Default to empty list if None
+                amount = transaction.amount
+            elif isinstance(transaction, InvoiceReceived):
+                # For InvoiceReceived, account_debited is JSON (list of accounts), account_credited is a string
+                debited_accounts = transaction.account_debited or []  # Default to empty list if None
+                credited_account = transaction.account_credited
+                amount = transaction.amount
+
         elif isinstance(transaction, CashReceiptJournal):
             amount = transaction.total
             debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
+            credited_accounts = transaction.account_credited or []
+
         elif isinstance(transaction, CashDisbursementJournal):
             amount = transaction.total
             debited_account = transaction.account_debited
-            credited_account = transaction.account_credited
-        elif isinstance(transaction, Transaction):
+            credited_accounts = transaction.account_credited or []
+
+        elif isinstance(transaction, Transaction):  # Handle the Transaction model
             amount = transaction.amount_debited
             debited_account = transaction.debited_account_name
-            credited_account = transaction.credited_account_name
+            credited_accounts = transaction.credited_account_name or []
+
         else:
-            continue  # Skip any unsupported transaction type
+            continue  # Skip if the transaction type is unrecognized
 
-        # Round amount to two decimal places to avoid floating-point issues
-        amount = round(amount, 2)
+        # Log the details of the transaction
+        logging.info(f"Processing Transaction: {transaction.id}")
+        logging.info(f"Debited Account: {debited_account}")
+        logging.info(f"Credited Accounts: {credited_accounts}")
 
-        # Get parent account details for debited and credited accounts
-        parent_debited = get_parent_account_details(debited_account)
-        parent_credited = get_parent_account_details(credited_account)
+        # Calculate total debited and credited amounts
+        total_debited_amount = 0
+        total_credited_amount = 0
 
-        # Function to check if the account name is within the range 100-399
-        def is_account_in_range(account_name):
-            """Check if the account name starts with a number between 100 and 399."""
-            if account_name and account_name.split('-')[0].isdigit():
-                account_number = int(account_name.split('-')[0])
-                return 100 <= account_number <= 399
-            return False
+        if debited_account:
+            if isinstance(debited_account, dict):
+                debited_account = debited_account.get('account_code', debited_account)
+            total_debited_amount = amount
 
-        # Handle debited account information
-        if parent_debited and parent_debited.get("account_name"):
-            account_name = parent_debited.get("account_name")
-            if is_account_in_range(account_name):  # Only process if account is in range 100-399
-                parent_account = parent_debited.get("parent_account")
-                sub_account_name = parent_debited.get("sub_account_name")
+        if isinstance(credited_accounts, list):
+            total_credited_amount = sum(
+                credited_account.get('amount', 0) if isinstance(credited_account, dict) else 0
+                for credited_account in credited_accounts
+            )
+        else:
+            total_credited_amount = amount
+
+        # Mirror the amounts to ensure balance
+        if total_debited_amount != total_credited_amount:
+            logging.warning(
+                f"Transaction ID {transaction.id}: Debit amount ({total_debited_amount}) "
+                f"does not match total credited amount ({total_credited_amount}). Mirroring amounts."
+            )
+            if total_debited_amount > total_credited_amount:
+                # Mirror debited amount to credited
+                total_credited_amount = total_debited_amount
+            else:
+                # Mirror credited amount to debited
+                total_debited_amount = total_credited_amount
+
+        # Use mirrored amounts for further processing
+        amount = total_debited_amount  # Use the mirrored debited amount
+
+        # Handle debited account
+        if debited_account:
+            if isinstance(debited_account, dict):
+                debited_account = debited_account.get('account_code', debited_account)
+
+            # Get parent account details for debited account
+            parent_debited = get_parent_account_details(debited_account)
+            if parent_debited and parent_debited.get("note_number"):
                 note_number = parent_debited.get("note_number")
+                parent_account = parent_debited.get("parent_account")
+                note_groups[note_number]["parent_account"] = parent_account
+                note_groups[note_number]["relevant_accounts"].add(debited_account)
+                note_groups[note_number]["amounts"].append(amount)  # Add individual amount
+                note_groups[note_number]["total_amount"] += amount
 
-                # Initialize parent account amount if it doesn't exist
-                if parent_account not in account_groups[account_name]["parent_accounts"]:
-                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
+        # Handle credited accounts
+        if isinstance(credited_accounts, list):
+            for credited_account in credited_accounts:
+                if isinstance(credited_account, dict):
+                    credited_account_code = credited_account.get('name')
+                    credited_amount = credited_account.get('amount', 0)
 
-                # Add amount to the parent account
-                account_groups[account_name]["parent_accounts"][parent_account] += amount
-                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["notes"].add(note_number)
-                account_groups[account_name]["total_amount"] += amount
+                    # Log the extracted credited account code and amount
+                    logging.info(f"Extracted Credited Account Code: {credited_account_code}")
+                    logging.info(f"Extracted Credited Amount: {credited_amount}")
 
-        # Handle credited account information
-        if parent_credited and parent_credited.get("account_name"):
-            account_name = parent_credited.get("account_name")
-            if is_account_in_range(account_name):  # Only process if account is in range 100-399
-                parent_account = parent_credited.get("parent_account")
-                sub_account_name = parent_credited.get("sub_account_name")
-                note_number = parent_credited.get("note_number")
-
-                # Initialize parent account amount if it doesn't exist
-                if parent_account not in account_groups[account_name]["parent_accounts"]:
-                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
-
-                # Add amount to the parent account
-                account_groups[account_name]["parent_accounts"][parent_account] += amount
-                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
-                account_groups[account_name]["notes"].add(note_number)
-                account_groups[account_name]["total_amount"] += amount
+                    # Get parent account details for credited account
+                    parent_credited = get_parent_account_details(credited_account_code)
+                    if parent_credited and parent_credited.get("note_number"):
+                        note_number = parent_credited.get("note_number")
+                        parent_account = parent_credited.get("parent_account")
+                        note_groups[note_number]["parent_account"] = parent_account
+                        note_groups[note_number]["relevant_accounts"].add(credited_account_code)
+                        note_groups[note_number]["amounts"].append(credited_amount)  # Add individual amount
+                        note_groups[note_number]["total_amount"] += credited_amount
 
     # Convert defaultdict to a regular dictionary for JSON serialization
-    account_groups = {
-        account_name: {
-            "parent_accounts": data["parent_accounts"],  # Include parent accounts and their amounts
-            "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
-            "notes": list(data["notes"]),  # Include note numbers
+    note_groups = {
+        note: {
+            "parent_account": data["parent_account"],
+            "relevant_accounts": list(data["relevant_accounts"]),
+            "amounts": data["amounts"],  # Include individual amounts
             "total_amount": round(data["total_amount"], 2)  # Round total amount
         }
-        for account_name, data in account_groups.items()
+        for note, data in note_groups.items() if data["relevant_accounts"]
     }
 
-    return jsonify(account_groups)
-
+    return jsonify(note_groups)
 
 def extract_account_code(account):
     """
