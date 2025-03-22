@@ -372,11 +372,13 @@ def login_user():
     user = User.query.filter_by(username=data['username']).first()
     if user and user.check_password(data['password']):
         # Create JWT token with both username and role in the identity
-        token = create_access_token(identity={"id": user.id, "username": user.username, "role": user.role})
+        token = create_access_token(
+            identity={"id": user.id, "username": user.username, "role": user.role},
+            expires_delta=timedelta(hours=3)  # Set the token to expire in 3 hours
+        )
         return jsonify({'token': token, 'role': user.role}), 200
 
     return jsonify({'message': 'Invalid username or password'}), 401
-
 # CEO-specific routes
 @app.route('/users', methods=['GET'])
 @role_required('Church CEO')
@@ -2746,7 +2748,7 @@ def get_opening_balance_for_debited_account(account_debited):
     
     
 @app.route('/get_trial_balance', methods=['GET'])
-def get_trial_balance():
+def get_trial_balancefffffff():
     try:
         # Initialize a list to store log entries
         log_entries = []
@@ -4237,103 +4239,120 @@ def get_all_revenue():
         return jsonify({'error': str(e)}), 500
     
     
-    
 
+
+# Initialize trial balance dictionary
+trial_balance = {}
+
+def update_trial_balance(account, debit, credit):
+    # Ensure the account is a string (hashable)
+    if not isinstance(account, str):
+        account = str(account)  # Convert to string if necessary
+
+    if account not in trial_balance:
+        trial_balance[account] = {'debit': 0, 'credit': 0}
+    trial_balance[account]['debit'] += debit
+    trial_balance[account]['credit'] += credit
 
 @app.route('/trial-balance', methods=['GET'])
-@jwt_required()
-def trial_balance():
-    current_user = get_jwt_identity()
-    current_user_id = current_user.get('id')
+def get_trial_balance():
+    global trial_balance
+    trial_balance = {}  # Reset trial balance for each request
 
-    # Initialize a dictionary to hold account balances
-    account_balances = defaultdict(lambda: {'debit': 0.0, 'credit': 0.0})
+    try:
+        # Debug: Print data from each table
+        print("Transactions:")
+        transactions = db.session.query(
+            Transaction.debited_account_name,
+            func.sum(Transaction.amount_debited).label('total_debit'),
+            Transaction.credited_account_name,
+            func.sum(Transaction.amount_credited).label('total_credit')
+        ).group_by(Transaction.debited_account_name, Transaction.credited_account_name).all()
+        print(transactions)
 
-    # Process Transactions (without user filter)
-    for transaction in Transaction.query.all():
-        account_balances[transaction.debited_account_name]['debit'] += transaction.amount_debited or 0
-        account_balances[transaction.credited_account_name]['credit'] += transaction.amount_credited or 0
+        for transaction in transactions:
+            update_trial_balance(transaction.debited_account_name, transaction.total_debit, 0)
+            update_trial_balance(transaction.credited_account_name, 0, transaction.total_credit)
 
-    # Process Invoices Issued
-    invoices_issued = InvoiceIssued.query.filter_by(user_id=current_user_id).all()
-    print("Invoices Issued:", invoices_issued)  # Debugging output
-    for invoice in invoices_issued:
-        # Ensure the amount is processed for both credited and debited accounts
-        if invoice.account_debited and isinstance(invoice.account_debited, str):
-            debit_amount = invoice.amount or 0  # Default to 0 if None
-            account_balances[invoice.account_debited]['debit'] += debit_amount
-            print(f"Debited {debit_amount} to {invoice.account_debited}")  # Debugging output
+        print("Invoice Issued:")
+        invoices_issued = db.session.query(
+            InvoiceIssued.account_debited,
+            InvoiceIssued.account_credited  # Fetch the credited accounts as a JSON field
+        ).all()
+        print(invoices_issued)
 
-        if invoice.account_credited and isinstance(invoice.account_credited, list):
-            for credited_entry in invoice.account_credited:
-                if isinstance(credited_entry, dict) and 'name' in credited_entry and 'amount' in credited_entry:
-                    account_name = credited_entry['name']
-                    amount = credited_entry['amount'] or 0  # Default to 0 if None
-                    if isinstance(amount, (int, float)):
-                        # Apply the credited amount to the credited account
-                        account_balances[account_name]['credit'] += amount
-                        print(f"Credited {amount} to {account_name}")  # Debugging output
-                        
-                        # Mirror the credited amount to the debited account
-                        if invoice.account_debited and isinstance(invoice.account_debited, str):
-                            account_balances[invoice.account_debited]['debit'] += amount
-                            print(f"Mirrored Credited {amount} to Debited {invoice.account_debited}")  # Debugging output
+        for invoice in invoices_issued:
+            credited_accounts = invoice.account_credited
+            if not isinstance(credited_accounts, list):
+                credited_accounts = []
 
-    # Process Invoices Received
-    invoices_received = InvoiceReceived.query.filter_by(user_id=current_user_id).all()
-    print("Invoices Received:", invoices_received)  # Debugging output
-    for invoice in invoices_received:
-        # Ensure the amount is processed for both credited and debited accounts
-        if invoice.account_credited and isinstance(invoice.account_credited, str):
-            credit_amount = invoice.amount or 0  # Default to 0 if None
-            account_balances[invoice.account_credited]['credit'] += credit_amount
-            print(f"Credited {credit_amount} to {invoice.account_credited}")  # Debugging output
+            total_credit = sum(account['amount'] for account in credited_accounts)
+            update_trial_balance(invoice.account_debited, total_credit, 0)
 
-        if invoice.account_debited and isinstance(invoice.account_debited, list):
-            for debited_entry in invoice.account_debited:
-                if isinstance(debited_entry, dict) and 'name' in debited_entry and 'amount' in debited_entry:
-                    account_name = debited_entry['name']
-                    amount = debited_entry['amount'] or 0  # Default to 0 if None
-                    if isinstance(amount, (int, float)):
-                        # Apply the debited amount to the debited account
-                        account_balances[account_name]['debit'] += amount
-                        print(f"Debited {amount} to {account_name}")  # Debugging output
-                        
-                        # Mirror the debited amount to the credited account
-                        if invoice.account_credited and isinstance(invoice.account_credited, str):
-                            account_balances[invoice.account_credited]['credit'] += amount
-                            print(f"Mirrored Debited {amount} to Credited {invoice.account_credited}")  # Debugging output
+            for account in credited_accounts:
+                update_trial_balance(account['name'], 0, account['amount'])
 
-    # Process Cash Receipt Journals (without user filter)
-    for receipt in CashReceiptJournal.query.all():
-        if receipt.account_debited:
-            account_balances[receipt.account_debited]['debit'] += receipt.total or 0
-        if receipt.account_credited:
-            account_balances[receipt.account_credited]['credit'] += receipt.total or 0
+        print("Invoice Received:")
+        invoices_received = db.session.query(
+            InvoiceReceived.account_debited,
+            func.sum(InvoiceReceived.amount).label('total_debit'),
+            InvoiceReceived.account_credited
+        ).group_by(InvoiceReceived.account_debited, InvoiceReceived.account_credited).all()
+        print(invoices_received)
 
-    # Process Cash Disbursement Journals (without user filter)
-    for disbursement in CashDisbursementJournal.query.all():
-        if disbursement.account_debited:
-            account_balances[disbursement.account_debited]['debit'] += disbursement.total or 0
-        if disbursement.account_credited:
-            account_balances[disbursement.account_credited]['credit'] += disbursement.total or 0
+        for invoice in invoices_received:
+            total_debit = invoice.total_debit
+            update_trial_balance(invoice.account_debited, total_debit, 0)
+            if invoice.account_credited:
+                update_trial_balance(invoice.account_credited, 0, total_debit)
 
-    # Generate Trial Balance
-    trial_balance_data = []
-    for account, balances in account_balances.items():
-        trial_balance_data.append({
-            'Account': account,
-            'Debit': balances['debit'],
-            'Credit': balances['credit']
-        })
+        print("Cash Receipts:")
+        cash_receipts = db.session.query(
+            CashReceiptJournal.account_debited,
+            func.sum(CashReceiptJournal.total).label('total_debit'),
+            CashReceiptJournal.account_credited
+        ).group_by(CashReceiptJournal.account_debited, CashReceiptJournal.account_credited).all()
+        print(cash_receipts)
 
-    # Sort Trial Balance by Account Name
-    trial_balance_data.sort(key=lambda x: x['Account'])
+        for receipt in cash_receipts:
+            update_trial_balance(receipt.account_debited, receipt.total_debit, 0)
+            if receipt.account_credited:
+                update_trial_balance(receipt.account_credited, 0, receipt.total_debit)
 
-    # Return JSON response
-    return jsonify(trial_balance_data)
+        print("Cash Disbursements:")
+        cash_disbursements = db.session.query(
+            CashDisbursementJournal.account_debited,
+            func.sum(CashDisbursementJournal.total).label('total_debit'),
+            CashDisbursementJournal.account_credited
+        ).group_by(CashDisbursementJournal.account_debited, CashDisbursementJournal.account_credited).all()
+        print(cash_disbursements)
 
+        for disbursement in cash_disbursements:
+            update_trial_balance(disbursement.account_debited, disbursement.total_debit, 0)
+            if disbursement.account_credited:
+                update_trial_balance(disbursement.account_credited, 0, disbursement.total_debit)
 
+        # Prepare the final trial balance
+        final_trial_balance = []
+        for account, balances in trial_balance.items():
+            final_trial_balance.append({
+                'account': account,
+                'debit': balances['debit'],
+                'credit': balances['credit'],
+                'balance': balances['debit'] - balances['credit']
+            })
+
+        return jsonify({
+            'status': 'success',
+            'trial_balance': final_trial_balance
+        }), 200
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 
@@ -4553,6 +4572,183 @@ def get_income_accounts_debited_credited():
 
 
 
+@app.route('/balance-statement/accounts', methods=['GET'])
+@jwt_required()
+def get_balance_accounts_debited_credited():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Query all transactions from each model
+    invoices_issued = db.session.query(InvoiceIssued).all()
+    invoices_received = db.session.query(InvoiceReceived).all()
+    cash_receipts = db.session.query(CashReceiptJournal).all()
+    cash_disbursements = db.session.query(CashDisbursementJournal).all()
+    transactions = db.session.query(Transaction).all()  # Include the Transaction model
+
+    # Retrieve all accounts once to optimize performance
+    all_accounts = ChartOfAccounts.query.all()
+
+    # Function to get parent account details and account names based on account code
+    def get_parent_account_details(account_code):
+        """Get the parent account details and account names based on account code."""
+        if account_code:
+            account_code_str = str(account_code)
+            for acc in all_accounts:
+                for subaccount in acc.sub_account_details:
+                    if account_code_str in subaccount.get('name', ''):
+                        # Return detailed account information including account names
+                        return {
+                            "parent_account": acc.parent_account,
+                            "account_name": acc.account_name,
+                            "account_type": acc.account_type,
+                            "note_number": acc.note_number,
+                            "sub_account_name": subaccount.get('name', '')  # Include sub-account name
+                        }
+            return {}  # Return empty dictionary if no parent account is found
+        return {}  # Return empty dictionary if no account code is provided
+
+    # Combine all transactions into a single list
+    all_transactions = (
+        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+    )
+
+    # Group transactions by account name (e.g., 100-Current Assets)
+    account_groups = defaultdict(lambda: {
+        "parent_accounts": {},  # Store parent accounts and their individual amounts
+        "relevant_accounts": set(),  # Store relevant sub-accounts
+        "notes": set(),  # Store note numbers
+        "total_amount": 0.0  # Total amount for the account group
+    })
+
+    for transaction in all_transactions:
+        # Initialize variables for amount, debited_account, and credited_account
+        amount = 0.0
+        debited_account = None
+        credited_account = None
+
+        # Process different transaction types
+        if isinstance(transaction, InvoiceIssued):
+            amount = transaction.amount
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited or []
+        elif isinstance(transaction, InvoiceReceived):
+            amount = transaction.amount
+            debited_account = transaction.account_debited or []
+            credited_account = transaction.account_credited
+        elif isinstance(transaction, CashReceiptJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited or []
+        elif isinstance(transaction, CashDisbursementJournal):
+            amount = transaction.total
+            debited_account = transaction.account_debited
+            credited_account = transaction.account_credited or []
+        elif isinstance(transaction, Transaction):
+            amount = transaction.amount_debited
+            debited_account = transaction.debited_account_name
+            credited_account = transaction.credited_account_name or []
+        else:
+            continue  # Skip any unsupported transaction type
+
+        # Round amount to two decimal places to avoid floating-point issues
+        amount = round(amount, 2)
+
+        # Calculate total debited and credited amounts
+        total_debited_amount = 0.0
+        total_credited_amount = 0.0
+
+        # Handle debited account
+        if debited_account:
+            if isinstance(debited_account, dict):
+                debited_account = debited_account.get('account_code', debited_account)
+            total_debited_amount = amount
+
+        # Handle credited accounts
+        if isinstance(credited_account, list):
+            total_credited_amount = sum(
+                credited.get('amount', 0) if isinstance(credited, dict) else 0
+                for credited in credited_account
+            )
+        else:
+            total_credited_amount = amount
+
+        # Mirror the amounts to ensure balance
+        if total_debited_amount != total_credited_amount:
+            logging.warning(
+                f"Transaction ID {transaction.id}: Debit amount ({total_debited_amount}) "
+                f"does not match total credited amount ({total_credited_amount}). Mirroring amounts."
+            )
+            if total_debited_amount > total_credited_amount:
+                # Mirror debited amount to credited
+                total_credited_amount = total_debited_amount
+            else:
+                # Mirror credited amount to debited
+                total_debited_amount = total_credited_amount
+
+        # Use mirrored amounts for further processing
+        amount = total_debited_amount  # Use the mirrored debited amount
+
+        # Get parent account details for debited and credited accounts
+        parent_debited = get_parent_account_details(debited_account)
+        parent_credited = get_parent_account_details(credited_account)
+
+        # Function to check if the account name is within the range 100-399
+        def is_account_in_range(account_name):
+            """Check if the account name starts with a number between 100 and 399."""
+            if account_name and account_name.split('-')[0].isdigit():
+                account_number = int(account_name.split('-')[0])
+                return 100 <= account_number <= 399
+            return False
+
+        # Handle debited account information
+        if parent_debited and parent_debited.get("account_name"):
+            account_name = parent_debited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 100-399
+                parent_account = parent_debited.get("parent_account")
+                sub_account_name = parent_debited.get("sub_account_name")
+                note_number = parent_debited.get("note_number")
+
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account] += amount
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
+
+        # Handle credited account information
+        if parent_credited and parent_credited.get("account_name"):
+            account_name = parent_credited.get("account_name")
+            if is_account_in_range(account_name):  # Only process if account is in range 100-399
+                parent_account = parent_credited.get("parent_account")
+                sub_account_name = parent_credited.get("sub_account_name")
+                note_number = parent_credited.get("note_number")
+
+                # Initialize parent account amount if it doesn't exist
+                if parent_account not in account_groups[account_name]["parent_accounts"]:
+                    account_groups[account_name]["parent_accounts"][parent_account] = 0.0
+
+                # Add amount to the parent account
+                account_groups[account_name]["parent_accounts"][parent_account] += amount
+                account_groups[account_name]["relevant_accounts"].add(sub_account_name)
+                account_groups[account_name]["notes"].add(note_number)
+                account_groups[account_name]["total_amount"] += amount
+
+    # Convert defaultdict to a regular dictionary for JSON serialization
+    account_groups = {
+        account_name: {
+            "parent_accounts": data["parent_accounts"],  # Include parent accounts and their amounts
+            "relevant_accounts": list(data["relevant_accounts"]),  # Include relevant sub-accounts
+            "notes": list(data["notes"]),  # Include note numbers
+            "total_amount": round(data["total_amount"], 2)  # Round total amount
+        }
+        for account_name, data in account_groups.items()
+    }
+
+    return jsonify(account_groups)
+
 
 
 @app.route('/transactions/accounts', methods=['GET'])
@@ -4584,7 +4780,7 @@ def get_accounts():
                             "parent_account": acc.parent_account,
                             "account_name": acc.account_name,
                             "account_type": acc.account_type,
-                            "note_number": acc.note_number
+                            "note_number": acc.note_number,
                         }
             return {}  # Return empty dictionary if no parent account is found
         return {}  # Return empty dictionary if no account code is provided
@@ -4599,7 +4795,7 @@ def get_accounts():
         "parent_account": None,
         "relevant_accounts": set(),
         "amounts": [],  # List to store individual amounts
-        "total_amount": 0.0
+        "total_amount": 0.0,
     })
 
     for transaction in all_transactions:
@@ -4720,12 +4916,13 @@ def get_accounts():
             "parent_account": data["parent_account"],
             "relevant_accounts": list(data["relevant_accounts"]),
             "amounts": data["amounts"],  # Include individual amounts
-            "total_amount": round(data["total_amount"], 2)  # Round total amount
+            "total_amount": round(data["total_amount"], 2),  # Round total amount
         }
         for note, data in note_groups.items() if data["relevant_accounts"]
     }
 
     return jsonify(note_groups)
+
 
 def extract_account_code(account):
     """
