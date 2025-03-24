@@ -4734,21 +4734,13 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @app.route('/transactions/accounts', methods=['GET'])
-@jwt_required()
 def get_accounts():
-    current_user = get_jwt_identity()
-    current_user_id = current_user.get('id')
-
     # Query all transactions from each model
-    invoices_issued = db.session.query(InvoiceIssued).all()
-    invoices_received = db.session.query(InvoiceReceived).all()
-    cash_receipts = db.session.query(CashReceiptJournal).all()
-    cash_disbursements = db.session.query(CashDisbursementJournal).all()
-    transactions = db.session.query(Transaction).all()
-
-    # Log invoices data
-    log_invoices_data(invoices_issued, "InvoiceIssued")
-    log_invoices_data(invoices_received, "InvoiceReceived")
+    invoices_issued = InvoiceIssued.query.all()
+    invoices_received = InvoiceReceived.query.all()
+    cash_receipts = CashReceiptJournal.query.all()
+    cash_disbursements = CashDisbursementJournal.query.all()
+    transactions = Transaction.query.all()
 
     # Retrieve all accounts once to optimize performance
     accounts = ChartOfAccounts.query.all()
@@ -4759,7 +4751,7 @@ def get_accounts():
         if account_code:
             account_code_str = str(account_code)
             for acc in accounts:
-                for subaccount in acc.sub_account_details:
+                for subaccount in acc.sub_account_details or []:
                     if account_code_str in subaccount.get('name', ''):
                         return {
                             "parent_account": acc.parent_account,
@@ -4780,6 +4772,10 @@ def get_accounts():
     for transaction in all_transactions:
         amount, debited_account, credited_accounts = extract_transaction_details(transaction)
 
+        # Log raw credited_accounts for debugging
+        logging.info(f"Processing transaction ID {getattr(transaction, 'id', 'N/A')}: "
+                     f"credited_accounts = {credited_accounts}")
+
         # Mirror amounts to ensure balance
         total_debited_amount, total_credited_amount = mirror_amounts(amount, debited_account, credited_accounts)
 
@@ -4789,11 +4785,16 @@ def get_accounts():
 
         # Update account balances for credited accounts
         if credited_accounts:
-            update_account_balances(credited_accounts, 0, total_credited_amount, account_balances)
+            for credited_account in credited_accounts:
+                if isinstance(credited_account, dict) and 'name' in credited_account and 'amount' in credited_account:
+                    update_account_balances(credited_account['name'], 0, credited_account['amount'], account_balances)
+                else:
+                    logging.warning(f"Invalid credited_account structure: {credited_account} "
+                                    f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
 
     # Prepare the final account balances
     final_account_balances = []
-    parent_account_balances = defaultdict(lambda: {"debit": 0.0, "credit": 0.0, "sub_account_balances": set()})
+    parent_account_balances = defaultdict(lambda: {"debit": 0.0, "credit": 0.0})
 
     for account, balances in account_balances.items():
         parent_account_details = get_parent_account_details(account)
@@ -4807,7 +4808,6 @@ def get_accounts():
         if parent_account:
             parent_account_balances[parent_account]["debit"] += balances['debit']
             parent_account_balances[parent_account]["credit"] += balances['credit']
-            parent_account_balances[parent_account]["sub_account_balances"].add(balances['balance'])
 
         # Append the individual account balance to the final list
         final_account_balances.append({
@@ -4821,14 +4821,7 @@ def get_accounts():
 
     # Add parent account balances to the final list
     for parent_account, balances in parent_account_balances.items():
-        # Check if all sub-accounts have the same balance
-        unique_balances = balances["sub_account_balances"]
-        if len(unique_balances) == 1:
-            # Pick one representative balance
-            parent_balance = list(unique_balances)[0]
-        else:
-            # Aggregate balances as usual
-            parent_balance = round(balances['debit'] - balances['credit'], 2)
+        parent_balance = round(balances['debit'] - balances['credit'], 2)
 
         final_account_balances.append({
             'account': parent_account,
@@ -4843,35 +4836,7 @@ def get_accounts():
         'status': 'success',
         'account_balances': final_account_balances
     }), 200
-
-
-# Helper Functions
-
-def log_invoices_data(invoices, invoice_type):
-    """Log the details of invoices."""
-    logging.info(f"Logging {invoice_type} data:")
-    for invoice in invoices:
-        try:
-            # Determine the correct date field based on the invoice type
-            if invoice_type == "InvoiceIssued":
-                date_field = invoice.date_issued
-            elif invoice_type == "InvoiceReceived":
-                date_field = invoice.date_received
-            else:
-                date_field = None
-
-            # Prepare the invoice data dictionary
-            invoice_data = {
-                "id": invoice.id,
-                "amount": invoice.amount,
-                "account_debited": invoice.account_debited,
-                "account_credited": invoice.account_credited,
-                "date": date_field.isoformat() if date_field else None,  # Handle missing or null dates
-                "description": invoice.description
-            }
-            logging.info(f"{invoice_type} Invoice: {invoice_data}")
-        except Exception as e:
-            logging.error(f"Error logging {invoice_type} invoice: {e}")
+# ===================== HELPER FUNCTIONS =====================
 
 def extract_transaction_details(transaction):
     """Extract transaction details (amount, debited account, credited accounts) based on type."""
@@ -4879,14 +4844,14 @@ def extract_transaction_details(transaction):
     debited_account = None
     credited_accounts = []
 
-    if isinstance(transaction, (InvoiceIssued, InvoiceReceived)):
+    if isinstance(transaction, InvoiceIssued):
         amount = transaction.amount
-        if isinstance(transaction, InvoiceIssued):
-            debited_account = transaction.account_debited
-            credited_accounts = transaction.account_credited or []
-        elif isinstance(transaction, InvoiceReceived):
-            debited_account = transaction.account_debited or []
-            credited_accounts = transaction.account_credited or []
+        debited_account = transaction.account_debited
+        credited_accounts = transaction.account_credited or []
+    elif isinstance(transaction, InvoiceReceived):
+        amount = transaction.amount
+        debited_account = transaction.account_debited or []
+        credited_accounts = transaction.account_credited or []
     elif isinstance(transaction, CashReceiptJournal):
         amount = transaction.total
         debited_account = transaction.account_debited
@@ -4898,11 +4863,32 @@ def extract_transaction_details(transaction):
     elif isinstance(transaction, Transaction):
         amount = transaction.amount_debited
         debited_account = transaction.debited_account_name
-        credited_accounts = transaction.credited_account_name or []
+        credited_accounts = [{"name": transaction.credited_account_name, "amount": transaction.amount_credited}]
 
-    return amount, debited_account, credited_accounts
+    # Normalize credited_accounts to ensure it's a list of dictionaries
+    normalized_credited_accounts = []
+    if isinstance(credited_accounts, list):
+        for account in credited_accounts:
+            if isinstance(account, dict) and 'name' in account and 'amount' in account:
+                normalized_credited_accounts.append(account)
+            elif isinstance(account, str):  # If it's a string, convert it to a dictionary
+                normalized_credited_accounts.append({"name": account, "amount": amount})
+            else:
+                logging.warning(f"Unexpected credited_account format: {account} "
+                                f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
+    elif isinstance(credited_accounts, dict):  # Single dictionary case
+        if 'name' in credited_accounts and 'amount' in credited_accounts:
+            normalized_credited_accounts.append(credited_accounts)
+        else:
+            logging.warning(f"Unexpected credited_account format: {credited_accounts} "
+                            f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
+    elif isinstance(credited_accounts, str):  # Single string case
+        normalized_credited_accounts.append({"name": credited_accounts, "amount": amount})
+    else:
+        logging.warning(f"Unexpected credited_account format: {credited_accounts} "
+                        f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
 
-
+    return amount, debited_account, normalized_credited_accounts
 def mirror_amounts(amount, debited_account, credited_accounts):
     """Mirror amounts to ensure debits and credits are balanced."""
     total_debited_amount = amount if debited_account else 0
@@ -4918,7 +4904,6 @@ def mirror_amounts(amount, debited_account, credited_accounts):
             total_debited_amount = total_credited_amount
 
     return total_debited_amount, total_credited_amount
-
 
 def update_account_balances(account_code, debit_amount, credit_amount, account_balances):
     """Update the account balances dictionary with the given debit and credit amounts."""
@@ -4937,6 +4922,8 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
     elif account_code:  # Handle cases where account_code is a single value
         account_balances[account_code]["debit"] += debit_amount
         account_balances[account_code]["credit"] += credit_amount
+
+# Run the application
 
 # Classification mapping for parent account code ranges
 CASH_FLOW_CATEGORIES = {
