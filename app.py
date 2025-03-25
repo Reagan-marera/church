@@ -17,7 +17,7 @@ import json
 from sqlalchemy.exc import IntegrityError,SQLAlchemyError
 from sqlalchemy import and_
 from sqlalchemy.orm import joinedload
-from sqlalchemy import func,or_
+from sqlalchemy import func, or_, literal, cast, Float, select
 from sqlalchemy.orm.exc import NoResultFound
 from collections import defaultdict
 app = Flask(__name__)
@@ -4924,6 +4924,9 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
         account_balances[account_code]["credit"] += credit_amount
 
 # Run the application
+import re
+from flask import jsonify
+from sqlalchemy import func
 
 # Classification mapping for parent account code ranges
 CASH_FLOW_CATEGORIES = {
@@ -4934,14 +4937,18 @@ CASH_FLOW_CATEGORIES = {
 
 # Function to classify cash flow based on parent account
 def get_cash_flow_category(parent_account):
-    # Extract numeric part of parent_account if possible (e.g., '1000-Cash & Cash Equivalent' -> '1000')
-    numeric_part = re.match(r"(\d+)", parent_account)  # Match digits at the beginning of the string
+    """
+    Classify the cash flow category based on the numeric prefix of the parent account.
+    :param parent_account: String representing the parent account (e.g., '4000-Cash & Cash Equivalent').
+    :return: Category name (e.g., 'Operating Activities') or None if no match is found.
+    """
+    # Extract numeric part of parent_account if possible (e.g., '4000-Cash & Cash Equivalent' -> '4000')
+    numeric_part = re.match(r"(\d+)", str(parent_account))  # Match digits at the beginning of the string
     
     if numeric_part:
         parent_account_number = int(numeric_part.group(1))  # Extract numeric part and convert to int
     else:
-        # If no numeric part, return None to indicate no match
-        return None
+        return None  # Return None if no numeric part is found
 
     # Iterate through the categories and check if the parent_account falls within the range
     for category, account_range in CASH_FLOW_CATEGORIES.items():
@@ -4953,7 +4960,11 @@ def get_cash_flow_category(parent_account):
 
 @app.route('/cash-flow', methods=['GET'])
 def get_cash_flow_statement():
-    # Initialize the results for each category, excluding 'Other Activities'
+    """
+    Generate a cash flow statement by aggregating inflows and outflows from the database.
+    :return: JSON response containing the cash flow statement.
+    """
+    # Initialize the results for each category
     cash_flow = {
         'Operating Activities': [],
         'Investing Activities': [],
@@ -4974,64 +4985,56 @@ def get_cash_flow_statement():
         func.sum(CashDisbursementJournal.bank).label('total_bank')
     ).group_by(CashDisbursementJournal.parent_account).all()
 
-    # Processing inflows
-    for inflow in inflows:
-        parent_account = inflow.parent_account  # This is a string like '1000-Cash & Cash Equivalent'
-        category = get_cash_flow_category(parent_account)  # Get the category based on parent_account
+    # Helper function to process transactions (inflows or outflows)
+    def process_transactions(transactions, transaction_type):
+        """
+        Process inflows or outflows and update the cash flow statement.
+        :param transactions: List of grouped transactions from the database.
+        :param transaction_type: 'inflow' or 'outflow'.
+        """
+        for transaction in transactions:
+            parent_account = transaction.parent_account
+            category = get_cash_flow_category(parent_account)
 
-        # Skip if the category is None (i.e., not a valid category)
-        if category is None:
-            continue
+            # Skip if the category is None (i.e., not a valid category)
+            if category is None:
+                continue
 
-        # Default to zero if no inflow exists
-        total_cash_inflow = inflow.total_cash if inflow.total_cash else 0
-        total_bank_inflow = inflow.total_bank if inflow.total_bank else 0
+            # Default to zero if no value exists
+            total_cash = transaction.total_cash if transaction.total_cash else 0
+            total_bank = transaction.total_bank if transaction.total_bank else 0
 
-        # Add to the appropriate category
-        cash_flow[category].append({
-            'parent_account': inflow.parent_account,
-            'inflow_cash': total_cash_inflow,
-            'inflow_bank': total_bank_inflow,
-            'outflow_cash': 0,
-            'outflow_bank': 0,
-            'net_cash_flow': total_cash_inflow,
-            'net_bank_flow': total_bank_inflow
-        })
+            # Find or create an entry for the parent account in the appropriate category
+            found = False
+            for entry in cash_flow[category]:
+                if entry['parent_account'] == parent_account:
+                    if transaction_type == 'inflow':
+                        entry['inflow_cash'] += total_cash
+                        entry['inflow_bank'] += total_bank
+                        entry['net_cash_flow'] += total_cash
+                        entry['net_bank_flow'] += total_bank
+                    elif transaction_type == 'outflow':
+                        entry['outflow_cash'] += total_cash
+                        entry['outflow_bank'] += total_bank
+                        entry['net_cash_flow'] -= total_cash
+                        entry['net_bank_flow'] -= total_bank
+                    found = True
+                    break
 
-    # Processing outflows
-    for outflow in outflows:
-        parent_account = outflow.parent_account  # This is a string like '1000-Cash & Cash Equivalent'
-        category = get_cash_flow_category(parent_account)  # Get the category based on parent_account
+            if not found:
+                cash_flow[category].append({
+                    'parent_account': parent_account,
+                    'inflow_cash': total_cash if transaction_type == 'inflow' else 0,
+                    'inflow_bank': total_bank if transaction_type == 'inflow' else 0,
+                    'outflow_cash': total_cash if transaction_type == 'outflow' else 0,
+                    'outflow_bank': total_bank if transaction_type == 'outflow' else 0,
+                    'net_cash_flow': total_cash if transaction_type == 'inflow' else -total_cash,
+                    'net_bank_flow': total_bank if transaction_type == 'inflow' else -total_bank
+                })
 
-        # Skip if the category is None (i.e., not a valid category)
-        if category is None:
-            continue
-
-        # Default to zero if no outflow exists
-        total_cash_outflow = outflow.total_cash if outflow.total_cash else 0
-        total_bank_outflow = outflow.total_bank if outflow.total_bank else 0
-
-        # Add or update in the appropriate category
-        found = False
-        for inflow in cash_flow[category]:
-            if inflow['parent_account'] == outflow.parent_account:
-                inflow['outflow_cash'] = total_cash_outflow
-                inflow['outflow_bank'] = total_bank_outflow
-                inflow['net_cash_flow'] -= total_cash_outflow
-                inflow['net_bank_flow'] -= total_bank_outflow
-                found = True
-                break
-        
-        if not found:
-            cash_flow[category].append({
-                'parent_account': outflow.parent_account,
-                'inflow_cash': 0,
-                'inflow_bank': 0,
-                'outflow_cash': total_cash_outflow,
-                'outflow_bank': total_bank_outflow,
-                'net_cash_flow': -total_cash_outflow,
-                'net_bank_flow': -total_bank_outflow
-            })
+    # Process inflows and outflows
+    process_transactions(inflows, 'inflow')
+    process_transactions(outflows, 'outflow')
 
     # Ensure the result is in the order defined by CASH_FLOW_CATEGORIES
     ordered_cash_flow = {
@@ -5141,112 +5144,194 @@ def consolidated_budget():
 
     return jsonify(report_data)
 
-
-import logging
-from sqlalchemy import or_, func
-from flask import jsonify
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-
 @app.route('/budget-vs-actuals', methods=['GET'])
 def budget_vs_actuals():
-    # Define valid parent account prefixes (updated to include all relevant prefixes)
-    valid_prefixes = ('4300', '4400', '4050', '7500', '1400', '4500', '1000')
+    try:
+        # Define valid parent account prefixes
+        valid_prefixes = ('4300', '4400', '4050', '5000', '7500', '1400', '4500', '1000')
 
-    # Step 1: Query original and adjusted budgets from the Estimate table
-    estimates = db.session.query(
-        Estimate.parent_account,
-        Estimate.total_estimates.label('original_budget'),
-        Estimate.adjusted_total_estimates.label('adjusted_budget')
-    ).filter(
-        or_(*[Estimate.parent_account.startswith(prefix) for prefix in valid_prefixes])
-    ).all()
+        # Normalize parent_account values for comparison
+        def normalize_parent_account(account):
+            if account:
+                numeric_prefix = ''.join(filter(str.isdigit, account))[:4]
+                return numeric_prefix if len(numeric_prefix) == 4 else None
+            return None
 
-    # Normalize parent_account values for comparison
-    def normalize_parent_account(account):
-        if account:
-            return account.split('-')[0].strip()[:4]  # Extract numeric prefix
-        return None
-
-    # Log estimates data
-    logging.debug("Estimates Data:")
-    for estimate in estimates:
-        logging.debug(f"Parent Account: {estimate.parent_account}, Original Budget: {estimate.original_budget}")
-
-    # Step 2: Query raw data from InvoiceIssued, InvoiceReceived, CashReceiptJournal, and CashDisbursementJournal
-    raw_data = db.session.query(
-        func.coalesce(InvoiceIssued.parent_account, InvoiceReceived.parent_account,
-                      CashReceiptJournal.parent_account, CashDisbursementJournal.parent_account).label('parent_account'),
-        (func.coalesce(InvoiceIssued.amount, 0) +
-         func.coalesce(InvoiceReceived.amount, 0) +
-         func.coalesce(CashReceiptJournal.total, 0) +
-         func.coalesce(CashDisbursementJournal.total, 0)).label('amount')
-    ).outerjoin(
-        InvoiceReceived, InvoiceIssued.parent_account == InvoiceReceived.parent_account
-    ).outerjoin(
-        CashReceiptJournal, InvoiceIssued.parent_account == CashReceiptJournal.parent_account
-    ).outerjoin(
-        CashDisbursementJournal, InvoiceIssued.parent_account == CashDisbursementJournal.parent_account
-    ).filter(
-        or_(
-            InvoiceIssued.parent_account != None,
-            InvoiceReceived.parent_account != None,
-            CashReceiptJournal.parent_account != None,
-            CashDisbursementJournal.parent_account != None
+        # Step 1: Query original and adjusted budgets from the Estimate table
+        estimates_query = db.session.query(
+            Estimate.parent_account,
+            Estimate.total_estimates.label('original_budget'),
+            Estimate.adjusted_total_estimates.label('adjusted_budget')
+        ).filter(
+            or_(*[Estimate.parent_account.like(f"{prefix}%") for prefix in valid_prefixes])
         )
-    ).all()
+        estimates = estimates_query.all()
 
-    # Normalize raw data and aggregate by parent account prefix
-    actuals_dict = {}
-    logging.debug("Raw Data and Normalized Prefixes:")
-    for row in raw_data:
-        parent_account = row.parent_account
-        amount = float(row.amount)  # Access the 'amount' column
-        normalized_prefix = normalize_parent_account(parent_account)
-        logging.debug(f"Parent Account: {parent_account}, Normalized Prefix: {normalized_prefix}, Amount: {amount}")
-        
-        # Check if the normalized prefix is valid and the amount is non-zero
-        if normalized_prefix in valid_prefixes and amount != 0:
-            logging.debug(f"Including Prefix: {normalized_prefix}, Amount: {amount}")
-            actuals_dict[normalized_prefix] = actuals_dict.get(normalized_prefix, 0.0) + amount
-        else:
-            logging.debug(f"Excluding Prefix: {normalized_prefix}, Amount: {amount}")
+        logging.debug("Estimates Data:")
+        for estimate in estimates:
+            logging.debug(f"Parent Account: {estimate.parent_account}, Original Budget: {estimate.original_budget}")
 
-    # Log aggregated results
-    logging.debug("Aggregated Actuals Data:")
-    for prefix, amount in actuals_dict.items():
-        logging.debug(f"Parent Account Prefix: {prefix}, Actual Amount: {amount}")
+        # Retrieve all accounts once to optimize performance
+        accounts = ChartOfAccounts.query.all()
 
-    # Step 3: Prepare the final report
-    report_data = []
-    for estimate in estimates:
-        parent_account = estimate.parent_account
-        normalized_parent_account = normalize_parent_account(parent_account)  # Normalize parent account
-        original_budget = float(estimate.original_budget)
-        adjusted_budget = float(estimate.adjusted_budget or 0.0)
-        final_budget = original_budget + adjusted_budget
-        actual_amount = actuals_dict.get(normalized_parent_account, 0.0)
+        # Helper function to get parent account details based on account code
+        def get_parent_account_details(account_code):
+            """Get the parent account details based on account code."""
+            if account_code:
+                account_code_str = str(account_code)
+                for acc in accounts:
+                    for subaccount in acc.sub_account_details or []:
+                        if account_code_str in subaccount.get('name', ''):
+                            return {
+                                "parent_account": acc.parent_account,
+                                "account_name": acc.account_name,
+                                "account_type": acc.account_type,
+                                "note_number": acc.note_number,
+                            }
+            return {}
 
-        # Calculate performance difference and utilization difference
-        performance_difference = final_budget - actual_amount
-        utilization_difference = round((performance_difference / final_budget) * 100, 2) if final_budget > 0 else 0.0
+        # Initialize a dictionary to track account balances
+        account_balances = defaultdict(lambda: {"debit": 0.0, "credit": 0.0})
 
-        # Append the data to the report
-        report_data.append({
-            'parent_account': parent_account,
-            'original_budget': original_budget,
-            'adjusted_budget': adjusted_budget,
-            'final_budget': final_budget,
-            'actual_amount': actual_amount,
-            'performance_difference': performance_difference,
-            'utilization_difference': utilization_difference
-        })
+        # Query all transactions from each model
+        invoices_issued = InvoiceIssued.query.all()
+        invoices_received = InvoiceReceived.query.all()
+        cash_receipts = CashReceiptJournal.query.all()
+        cash_disbursements = CashDisbursementJournal.query.all()
+        transactions = Transaction.query.all()
 
-    # Return the report data as a JSON response
-    return jsonify(report_data)
+        # Combine all transactions into a single list
+        all_transactions = (
+            invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
+        )
+
+        # Process each transaction
+        for transaction in all_transactions:
+            amount, debited_account, credited_accounts = extract_transaction_details(transaction)
+
+            # Log raw credited_accounts for debugging
+            logging.info(f"Processing transaction ID {getattr(transaction, 'id', 'N/A')}: "
+                         f"credited_accounts = {credited_accounts}")
+
+            # Update account balances for the debited account
+            if debited_account:
+                update_account_balances(debited_account, abs(amount), 0, account_balances)
+
+            # Update account balances for credited accounts
+            for credited_account in credited_accounts:
+                if isinstance(credited_account, dict) and 'name' in credited_account and 'amount' in credited_account:
+                    credited_amount = abs(credited_account['amount'])  # Ensure positive amount
+                    update_account_balances(credited_account['name'], 0, credited_amount, account_balances)
+
+        # Prepare actuals data based on account balances
+        actuals_dict = defaultdict(float)
+        for account, balances in account_balances.items():
+            parent_account_details = get_parent_account_details(account)
+            parent_account = parent_account_details.get('parent_account')
+            if parent_account:
+                normalized_prefix = normalize_parent_account(parent_account)
+                if normalized_prefix in valid_prefixes:
+                    actuals_dict[normalized_prefix] += abs(balances['debit'] - balances['credit'])
+
+        # Log aggregated results
+        logging.debug("Aggregated Actuals Data:")
+        for prefix, amount in actuals_dict.items():
+            logging.debug(f"Parent Account Prefix: {prefix}, Actual Amount: {amount}")
+
+        # Step 3: Prepare the final report
+        report_data = []
+        for estimate in estimates:
+            parent_account = estimate.parent_account
+            normalized_parent_account = normalize_parent_account(parent_account)
+            original_budget = float(estimate.original_budget)
+            adjusted_budget = float(estimate.adjusted_budget or 0.0)
+            final_budget = original_budget + adjusted_budget
+            actual_amount = actuals_dict.get(normalized_parent_account, 0.0)
+            performance_difference = final_budget - actual_amount
+            utilization_difference = round((performance_difference / final_budget) * 100, 2) if final_budget > 0 else 0.0
+
+            report_data.append({
+                'parent_account': parent_account,
+                'original_budget': original_budget,
+                'adjusted_budget': adjusted_budget,
+                'final_budget': final_budget,
+                'actual_amount': actual_amount,
+                'performance_difference': performance_difference,
+                'utilization_difference': utilization_difference
+            })
+
+        return jsonify(report_data)
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error occurred: {str(e)}")
+        return jsonify({"error": "An error occurred while processing the request."}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error occurred: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 
+# ===================== HELPER FUNCTIONS =====================
+def extract_transaction_details(transaction):
+    """Extract transaction details (amount, debited account, credited accounts) based on type."""
+    amount = 0
+    debited_account = None
+    credited_accounts = []
 
+    if isinstance(transaction, InvoiceIssued):
+        amount = transaction.amount
+        debited_account = transaction.account_debited
+        credited_accounts = transaction.account_credited or []
+    elif isinstance(transaction, InvoiceReceived):
+        amount = transaction.amount
+        debited_account = transaction.account_debited or []
+        credited_accounts = transaction.account_credited or []
+    elif isinstance(transaction, CashReceiptJournal):
+        amount = transaction.total
+        debited_account = transaction.account_debited
+        credited_accounts = transaction.account_credited or []
+    elif isinstance(transaction, CashDisbursementJournal):
+        amount = transaction.total
+        debited_account = transaction.account_debited
+        credited_accounts = transaction.account_credited or []
+    elif isinstance(transaction, Transaction):
+        amount = transaction.amount_debited
+        debited_account = transaction.debited_account_name
+        credited_accounts = [{"name": transaction.credited_account_name, "amount": transaction.amount_credited}]
+
+    # Normalize credited_accounts to ensure it's a list of dictionaries
+    normalized_credited_accounts = []
+    if isinstance(credited_accounts, list):
+        for account in credited_accounts:
+            if isinstance(account, dict) and 'name' in account and 'amount' in account:
+                normalized_credited_accounts.append(account)
+            elif isinstance(account, str):  # If it's a string, convert it to a dictionary
+                normalized_credited_accounts.append({"name": account, "amount": amount})
+    elif isinstance(credited_accounts, dict):  # Single dictionary case
+        if 'name' in credited_accounts and 'amount' in credited_accounts:
+            normalized_credited_accounts.append(credited_accounts)
+    elif isinstance(credited_accounts, str):  # Single string case
+        normalized_credited_accounts.append({"name": credited_accounts, "amount": amount})
+
+    return abs(amount), debited_account, normalized_credited_accounts  # Ensure positive amount
+
+
+def update_account_balances(account_code, debit_amount, credit_amount, account_balances):
+    """Update the account balances dictionary with the given debit and credit amounts."""
+    if isinstance(account_code, list):  # Handle cases where account_code is a list
+        for code in account_code:
+            if isinstance(code, dict):
+                code = code.get('name')  # Assuming 'name' is the key for the account code
+            if code:  # Ensure the code is not empty
+                account_balances[code]["debit"] += abs(debit_amount)  # Ensure positive debit
+                account_balances[code]["credit"] += abs(credit_amount)  # Ensure positive credit
+    elif isinstance(account_code, dict):
+        account_code = account_code.get('name')  # Assuming 'name' is the key for the account code
+        if account_code:  # Ensure the code is not empty
+            account_balances[account_code]["debit"] += abs(debit_amount)  # Ensure positive debit
+            account_balances[account_code]["credit"] += abs(credit_amount)  # Ensure positive credit
+    elif account_code:  # Handle cases where account_code is a single value
+        account_balances[account_code]["debit"] += abs(debit_amount)  # Ensure positive debit
+        account_balances[account_code]["credit"] += abs(credit_amount)  # Ensure positive credit
+    
 if __name__ == '__main__':
     app.run(debug=True)
