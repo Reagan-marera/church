@@ -214,7 +214,8 @@ class Transaction(db.Model):
     amount_debited = db.Column(db.Float, nullable=False)
     description = db.Column(db.String(200))
     date_issued = db.Column(db.Date, nullable=False)
-
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Add this line
+    user = db.relationship('User', backref=db.backref('transactions', lazy=True))  # Add this line
 
 class InvoiceIssued(db.Model):
     id = db.Column(db.Integer, primary_key=True)

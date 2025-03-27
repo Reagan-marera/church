@@ -3483,6 +3483,10 @@ def get_transaction():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
+    # Check if the current user ID is valid
+    if not current_user_id:
+        return jsonify({"error": "Unauthorized access. User ID not found."}), 401
+
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
 
@@ -3500,7 +3504,8 @@ def get_transaction():
             return False
 
     def fetch_transactions_from_model(model, transaction_type):
-        data = model.query.all()
+        # Filter by the current user
+        data = model.query.filter_by(created_by=current_user_id).all()
         transactions = []
         for transaction in data:
             date = getattr(transaction, 'receipt_date', getattr(transaction, 'disbursement_date', None))
@@ -3526,46 +3531,18 @@ def get_transaction():
                 "created_by": transaction.created_by,
                 "name": getattr(transaction, 'name', None),
             })
-            account_balances[transaction.account_debited]["debits"] += getattr(transaction, 'total', 0)
-            account_balances[transaction.account_credited]["credits"] += getattr(transaction, 'total', 0)
         return transactions
 
     transactions = []
     account_balances = defaultdict(lambda: {"debits": 0.0, "credits": 0.0})
 
+    # Fetch transactions from models, filtered by current user
     transactions.extend(fetch_transactions_from_model(CashReceiptJournal, "Cash Receipt"))
     transactions.extend(fetch_transactions_from_model(CashDisbursementJournal, "Cash Disbursement"))
 
-    db_transactions = Transaction.query.all()
-    for transaction in db_transactions:
-        debited_account_valid = is_account_code_less_than_1099(transaction.debited_account_name)
-        credited_account_valid = is_account_code_less_than_1099(transaction.credited_account_name)
-
-        amount_debited = transaction.amount_debited if debited_account_valid else 0
-        amount_credited = transaction.amount_credited if credited_account_valid else 0
-
-        if amount_debited > 0 or amount_credited > 0:
-            if start_date and transaction.date_issued < start_date:
-                continue
-            if end_date and transaction.date_issued > end_date:
-                continue
-            transactions.append({
-                "transaction_type": "Transaction",
-                "date": transaction.date_issued.isoformat() if transaction.date_issued else None,
-                "description": transaction.description,
-                "account_debited": transaction.debited_account_name,
-                "account_credited": transaction.credited_account_name,
-                "amount_debited": amount_debited,
-                "amount_credited": amount_credited,
-                "created_by": "Transaction Model",
-            })
-
-            if debited_account_valid:
-                account_balances[transaction.debited_account_name]["debits"] += transaction.amount_debited
-            if credited_account_valid:
-                account_balances[transaction.credited_account_name]["credits"] += transaction.amount_credited
-
+    # Fetch invoices issued, filtered by current user
     db_invoices = InvoiceIssued.query.filter(
+        InvoiceIssued.user_id == current_user_id,
         (InvoiceIssued.date_issued >= start_date) if start_date else True,
         (InvoiceIssued.date_issued <= end_date) if end_date else True
     ).all()
@@ -3598,6 +3575,7 @@ def get_transaction():
                     if is_account_code_less_than_1099(account['name']):
                         account_balances[account['name']]["credits"] += account["amount"]
 
+    # Group accounts and calculate balances for the current user
     grouped_accounts = []
     for account_code, balances in account_balances.items():
         if is_account_code_less_than_1099(account_code):
@@ -3613,17 +3591,22 @@ def get_transaction():
         "transactions": transactions,
         "filtered_grouped_accounts": grouped_accounts
     })
+    
+    
 @app.route('/expensetransactions', methods=['GET'])
 @jwt_required()
 def get_all_expense():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
+    # Check if the current user ID is valid
+    if not current_user_id:
+        return jsonify({"error": "Unauthorized access. User ID not found."}), 401
+
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
 
     try:
-        # Parse dates as date objects
         start_date = datetime.fromisoformat(start_date_str).date() if start_date_str else None
         end_date = datetime.fromisoformat(end_date_str).date() if end_date_str else None
     except ValueError:
@@ -3644,9 +3627,8 @@ def get_all_expense():
     def get_parent_account(account_code):
         if not account_code:
             return None
-
         account_code_str = str(account_code)
-        accounts = ChartOfAccounts.query.all()
+        accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
         for acc in accounts:
             for subaccount in acc.sub_account_details:
                 if account_code_str in subaccount.get('name', ''):
@@ -3654,7 +3636,23 @@ def get_all_expense():
         return None
 
     def fetch_filtered_data(model, account_field, account_range):
-        data = model.query.filter(getattr(model, account_field).like('%-%')).all()
+        if hasattr(model, 'user_id'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.user_id == current_user_id
+            ).all()
+        elif hasattr(model, 'created_by'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.created_by == current_user_id
+            ).all()
+        else:
+            data = []
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if 'name' in subaccount:
+                        data.extend(model.query.filter(getattr(model, account_field) == subaccount['name']).all())
         filtered_data = [
             item for item in data
             if extract_account_code(getattr(item, account_field)) and
@@ -3663,75 +3661,70 @@ def get_all_expense():
         return filtered_data
 
     try:
-        # Fetch cash disbursements where the account debited is in the expense range (5000-9999)
         cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (5000, 9999))
         cash_disbursements_data = [{
-            'id': cd.id,
-            'disbursement_date': cd.disbursement_date.isoformat(),
-            'cheque_no': cd.cheque_no,
-            'p_voucher_no': cd.p_voucher_no,
-            'to_whom_paid': cd.to_whom_paid,
-            'payment_type': cd.payment_type,
+            'type': 'Cash Disbursement',
+            'date': cd.disbursement_date.isoformat(),
+            'reference': cd.cheque_no,
+            'from': cd.to_whom_paid,
             'description': cd.description,
-            'account_debited': cd.account_debited,
+            'dr_amount': cd.total if cd.account_debited else 0,
+            'cr_amount': cd.total if cd.account_credited else 0,
             'parent_account': get_parent_account(extract_account_code(cd.account_debited)),
-            'cashbook': cd.cashbook,
-            'cash': cd.cash,
-            'bank': cd.bank,
-            'total': cd.total,
-            'created_by': cd.created_by,
+            'account_name': cd.account_debited,
         } for cd in cash_disbursements_filtered if (not start_date or cd.disbursement_date >= start_date) and (not end_date or cd.disbursement_date <= end_date)]
 
-        # Fetch invoices received where the account debited is in the expense range (5000-9999)
         invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (5000, 9999))
         invoices_received_data = [{
-            'id': inv.id,
-            'invoice_number': inv.invoice_number,
-            'date_issued': inv.date_issued.isoformat(),
+            'type': 'Invoice Received',
+            'date': inv.date_issued.isoformat(),
+            'reference': inv.invoice_number,
+            'from': inv.name,
             'description': inv.description,
-            'amount': inv.amount,
-            'user_id': inv.user_id,
-            'account_debited': inv.account_debited,
+            'dr_amount': inv.amount if inv.account_debited else 0,
+            'cr_amount': inv.amount if inv.account_credited else 0,
             'parent_account': get_parent_account(extract_account_code(inv.account_debited)),
-            'name': inv.name
+            'account_name': inv.account_debited,
         } for inv in invoices_received_filtered if (not start_date or inv.date_issued >= start_date) and (not end_date or inv.date_issued <= end_date)]
 
-        # Fetch transactions where the account debited or credited is in the expense range (5000-9999)
         transactions_filtered = (
             fetch_filtered_data(Transaction, 'debited_account_name', (5000, 9999)) +
             fetch_filtered_data(Transaction, 'credited_account_name', (5000, 9999))
         )
         transactions_data = [{
-            'id': txn.id,
-            'debited_account_name': txn.debited_account_name,
-            'credited_account_name': txn.credited_account_name,
-            'amount_debited': txn.amount_debited,
-            'amount_credited': txn.amount_credited,
+            'type': 'Transaction',
+            'date': txn.date_issued.isoformat(),
+            'reference': txn.id,
+            'from': txn.debited_account_name,
             'description': txn.description,
-            'date_issued': txn.date_issued.isoformat(),
+            'dr_amount': txn.amount_debited,
+            'cr_amount': txn.amount_credited,
             'parent_account': get_parent_account(
                 extract_account_code(txn.debited_account_name) if txn.debited_account_name else
                 extract_account_code(txn.credited_account_name)
             ),
+            'account_name': txn.debited_account_name or txn.credited_account_name,
         } for txn in transactions_filtered if (not start_date or txn.date_issued >= start_date) and (not end_date or txn.date_issued <= end_date)]
 
-        # Prepare the response
-        response = {
-            'cash_disbursements': cash_disbursements_data,
-            'invoices_received': invoices_received_data,
-            'transactions': transactions_data
-        }
+        all_data = cash_disbursements_data + invoices_received_data + transactions_data
+        total_dr = sum(item['dr_amount'] for item in all_data)
+        total_cr = sum(item['cr_amount'] for item in all_data)
+        closing_balance = total_dr - total_cr
 
+        response = {
+            'transactions': all_data,
+            'total_dr': total_dr,
+            'total_cr': total_cr,
+            'closing_balance': closing_balance
+        }
         return jsonify(response)
 
     except SQLAlchemyError as db_error:
         print(f"Database error: {db_error}")
         return jsonify({'error': 'Database error occurred while fetching expense transactions.'}), 500
-
     except Exception as e:
         print(f"Unexpected error: {e}")
         return jsonify({'error': 'An unexpected error occurred while processing the request.'}), 500
-
 
 @app.route('/liabilitytransactions', methods=['GET'])
 @jwt_required()
@@ -3739,11 +3732,13 @@ def get_all_liabilities():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
+    if not current_user_id:
+        return jsonify({"error": "Unauthorized access. User ID not found."}), 401
+
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
 
     try:
-        # Parse dates as date objects
         start_date = datetime.fromisoformat(start_date_str).date() if start_date_str else None
         end_date = datetime.fromisoformat(end_date_str).date() if end_date_str else None
     except ValueError:
@@ -3764,9 +3759,8 @@ def get_all_liabilities():
     def get_parent_account(account_code):
         if not account_code:
             return None
-
         account_code_str = str(account_code)
-        accounts = ChartOfAccounts.query.all()
+        accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
         for acc in accounts:
             for subaccount in acc.sub_account_details:
                 if account_code_str in subaccount.get('name', ''):
@@ -3774,7 +3768,23 @@ def get_all_liabilities():
         return None
 
     def fetch_filtered_data(model, account_field, account_range):
-        data = model.query.filter(getattr(model, account_field).like('%-%')).all()
+        if hasattr(model, 'user_id'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.user_id == current_user_id
+            ).all()
+        elif hasattr(model, 'created_by'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.created_by == current_user_id
+            ).all()
+        else:
+            data = []
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if 'name' in subaccount:
+                        data.extend(model.query.filter(getattr(model, account_field) == subaccount['name']).all())
         filtered_data = [
             item for item in data
             if extract_account_code(getattr(item, account_field)) and
@@ -3783,7 +3793,6 @@ def get_all_liabilities():
         return filtered_data
 
     try:
-        # Fetch cash disbursements where the account debited is in the liability range (2000-2999)
         cash_disbursements_filtered = fetch_filtered_data(CashDisbursementJournal, 'account_debited', (2000, 2999))
         cash_disbursements_data = [{
             'id': cd.id,
@@ -3799,10 +3808,8 @@ def get_all_liabilities():
             'cash': cd.cash,
             'bank': cd.bank,
             'total': cd.total,
-            'created_by': cd.created_by,
         } for cd in cash_disbursements_filtered if (not start_date or cd.disbursement_date >= start_date) and (not end_date or cd.disbursement_date <= end_date)]
 
-        # Fetch invoices received where the account debited is in the liability range (2000-2999)
         invoices_received_filtered = fetch_filtered_data(InvoiceReceived, 'account_debited', (2000, 2999))
         invoices_received_data = [{
             'id': inv.id,
@@ -3810,13 +3817,11 @@ def get_all_liabilities():
             'date_issued': inv.date_issued.isoformat(),
             'description': inv.description,
             'amount': inv.amount,
-            'user_id': inv.user_id,
             'account_debited': inv.account_debited,
             'parent_account': get_parent_account(extract_account_code(inv.account_debited)),
             'name': inv.name
         } for inv in invoices_received_filtered if (not start_date or inv.date_issued >= start_date) and (not end_date or inv.date_issued <= end_date)]
 
-        # Fetch transactions where the account debited or credited is in the liability range (2000-2999)
         transactions_filtered = (
             fetch_filtered_data(Transaction, 'debited_account_name', (2000, 2999)) +
             fetch_filtered_data(Transaction, 'credited_account_name', (2000, 2999))
@@ -3835,24 +3840,19 @@ def get_all_liabilities():
             ),
         } for txn in transactions_filtered if (not start_date or txn.date_issued >= start_date) and (not end_date or txn.date_issued <= end_date)]
 
-        # Prepare the response
         response = {
             'cash_disbursements': cash_disbursements_data,
             'invoices_received': invoices_received_data,
             'transactions': transactions_data
         }
-
         return jsonify(response)
 
     except SQLAlchemyError as db_error:
         print(f"Database error: {db_error}")
         return jsonify({'error': 'Database error occurred while fetching liability transactions.'}), 500
-
     except Exception as e:
         print(f"Unexpected error: {e}")
         return jsonify({'error': 'An unexpected error occurred while processing the request.'}), 500
-
-
 
 
 @app.route('/net-assets', methods=['GET'])
@@ -3863,14 +3863,12 @@ def get_net_assets():
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
     try:
-        # Parse dates as date objects instead of datetime objects
         start_date = datetime.fromisoformat(start_date_str).date() if start_date_str else None
         end_date = datetime.fromisoformat(end_date_str).date() if end_date_str else None
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
     def extract_account_code(account_field):
-        # Existing logic remains unchanged
         if isinstance(account_field, list):
             for item in account_field:
                 if 'name' in item:
@@ -3897,7 +3895,6 @@ def get_net_assets():
             return None
 
     def get_parent_account(account_code, accounts):
-        # Existing logic remains unchanged
         if account_code:
             account_code_str = str(account_code)
             for acc in accounts:
@@ -3908,15 +3905,14 @@ def get_net_assets():
         return ''
 
     def is_account_in_range(account):
-        # Existing logic remains unchanged
         if account and account.split('-')[0].strip().isdigit():
             account_number = int(account.split('-')[0].strip())
             return 3000 <= account_number <= 3999
         return False
 
     try:
-        transactions = Transaction.query.all()
-        accounts = ChartOfAccounts.query.all()
+        transactions = Transaction.query.filter_by(user_id=current_user_id).all()
+        accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
         total_credits = 0.0
         total_debits = 0.0
         filtered_transactions = []
@@ -3926,7 +3922,6 @@ def get_net_assets():
             credited_in_range = is_account_in_range(credited_account)
             debited_in_range = is_account_in_range(debited_account)
             if credited_in_range or debited_in_range:
-                # Ensure txn.date_issued is converted to date for comparison
                 txn_date = txn.date_issued.date() if isinstance(txn.date_issued, datetime) else txn.date_issued
                 if (not start_date or txn_date >= start_date) and (not end_date or txn_date <= end_date):
                     filtered_transactions.append(txn)
@@ -4001,7 +3996,7 @@ def get_all_assets():
     def get_parent_account(account_code):
         if account_code:
             account_code_str = str(account_code)
-            accounts = ChartOfAccounts.query.all()
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
             for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
@@ -4010,7 +4005,23 @@ def get_all_assets():
         return ''
 
     def fetch_filtered_data(model, account_field, account_range):
-        data = model.query.all()
+        if hasattr(model, 'user_id'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.user_id == current_user_id
+            ).all()
+        elif hasattr(model, 'created_by'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.created_by == current_user_id
+            ).all()
+        else:
+            data = []
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if 'name' in subaccount:
+                        data.extend(model.query.filter(getattr(model, account_field) == subaccount['name']).all())
         filtered_data = [
             item for item in data
             if extract_account_code(getattr(item, account_field)) and account_range[0] <= extract_account_code(getattr(item, account_field)) <= account_range[1]
@@ -4115,6 +4126,7 @@ def get_all_assets():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
     
 
 
@@ -4163,7 +4175,7 @@ def get_all_revenue():
     def get_parent_account(account_code):
         if account_code:
             account_code_str = str(account_code)
-            accounts = ChartOfAccounts.query.all()
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
             for acc in accounts:
                 for subaccount in acc.sub_account_details:
                     if account_code_str in subaccount.get('name', ''):
@@ -4172,7 +4184,23 @@ def get_all_revenue():
         return None
 
     def fetch_filtered_data(model, account_field, account_range):
-        data = model.query.all()
+        if hasattr(model, 'user_id'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.user_id == current_user_id
+            ).all()
+        elif hasattr(model, 'created_by'):
+            data = model.query.filter(
+                getattr(model, account_field).like('%-%'),
+                model.created_by == current_user_id
+            ).all()
+        else:
+            data = []
+            accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
+            for acc in accounts:
+                for subaccount in acc.sub_account_details:
+                    if 'name' in subaccount:
+                        data.extend(model.query.filter(getattr(model, account_field) == subaccount['name']).all())
         filtered_data = [
             item for item in data
             if extract_account_code(getattr(item, account_field)) is not None
@@ -4181,7 +4209,6 @@ def get_all_revenue():
         return filtered_data
 
     try:
-        # Fetch cash receipts where the account credited is in the revenue range (4000-4999)
         cash_receipts_filtered = fetch_filtered_data(CashReceiptJournal, 'account_credited', (4000, 4999))
         cash_receipts_data = [{
             'id': cr.id,
@@ -4201,7 +4228,6 @@ def get_all_revenue():
             'name': cr.name
         } for cr in cash_receipts_filtered if (not start_date or cr.receipt_date >= start_date) and (not end_date or cr.receipt_date <= end_date)]
 
-        # Fetch invoices issued where the account credited is in the revenue range (4000-4999)
         invoices_issued_filtered = fetch_filtered_data(InvoiceIssued, 'account_credited', (4000, 4999))
         invoices_issued_data = [{
             'id': inv.id,
@@ -4215,7 +4241,6 @@ def get_all_revenue():
             'name': inv.name
         } for inv in invoices_issued_filtered if (not start_date or inv.date_issued >= start_date) and (not end_date or inv.date_issued <= end_date)]
 
-        # Fetch transactions where the account credited or debited is in the revenue range (4000-4999)
         transactions_filtered = fetch_filtered_data(Transaction, 'debited_account_name', (4000, 4999)) + fetch_filtered_data(Transaction, 'credited_account_name', (4000, 4999))
         transactions_data = [{
             'id': txn.id,
@@ -4226,7 +4251,6 @@ def get_all_revenue():
             'parent_account': get_parent_account(extract_account_code(txn.debited_account_name) if txn.debited_account_name else extract_account_code(txn.credited_account_name)),
         } for txn in transactions_filtered if (not start_date or txn.date_issued >= start_date) and (not end_date or txn.date_issued <= end_date)]
 
-        # Prepare the response
         response = {
             'cash_receipts': cash_receipts_data,
             'invoices_issued': invoices_issued_data,
@@ -4237,6 +4261,7 @@ def get_all_revenue():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
     
     
 
@@ -5329,9 +5354,9 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
         if account_code:  # Ensure the code is not empty
             account_balances[account_code]["debit"] += abs(debit_amount)  # Ensure positive debit
             account_balances[account_code]["credit"] += abs(credit_amount)  # Ensure positive credit
-    elif account_code:  # Handle cases where account_code is a single value
-        account_balances[account_code]["debit"] += abs(debit_amount)  # Ensure positive debit
-        account_balances[account_code]["credit"] += abs(credit_amount)  # Ensure positive credit
+    elif account_code:  
+        account_balances[account_code]["debit"] += abs(debit_amount)  
+        account_balances[account_code]["credit"] += abs(credit_amount)  
     
 if __name__ == '__main__':
     app.run(debug=True)
