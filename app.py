@@ -3211,43 +3211,46 @@ def update_subaccount_details():
 
 
 @app.route('/submit-transaction', methods=['POST'])
+@jwt_required()
 def submit_transaction():
     try:
-        # Retrieve the data from the form (JSON body)
+        # Get current user identity
+        current_user = get_jwt_identity()
+        current_user_id = current_user.get('id')
+
+        # Parse request data
         data = request.get_json()
+        credited_account = data.get("creditedAccount")
+        debited_account = data.get("debitedAccount")
+        amount_credited = data.get("amountCredited")
+        amount_debited = data.get("amountDebited")
+        description = data.get("description")
+        date_issued = data.get("dateIssued")
 
-        # Extract values
-        credited_account = data.get('creditedAccount')
-        debited_account = data.get('debitedAccount')
-        amount_credited = data.get('amountCredited')
-        amount_debited = data.get('amountDebited')
-        description = data.get('description')
-        date_issued = data.get('dateIssued')  # Extract date_issued from the request
+        # Validate required fields
+        if not all([credited_account, debited_account, amount_credited, amount_debited, date_issued]):
+            return jsonify({"error": "Missing required fields"}), 400
 
-     
-        # Convert date_issued to a datetime object
-        try:
-            date_issued = datetime.strptime(date_issued, '%Y-%m-%d').date()
-        except ValueError:
-            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
-
-        # Save transaction to the database
+        # Create a new transaction and associate it with the current user
         new_transaction = Transaction(
             credited_account_name=credited_account,
             debited_account_name=debited_account,
-            amount_credited=amount_credited,
-            amount_debited=amount_debited,
+            amount_credited=float(amount_credited),
+            amount_debited=float(amount_debited),
             description=description,
-            date_issued=date_issued  # Include date_issued
+            date_issued=date_issued,
+            user_id=current_user_id  # Associate transaction with the current user
         )
+
+        # Add and commit the transaction to the database
         db.session.add(new_transaction)
         db.session.commit()
 
-        # Return a success response
-        return jsonify({"message": "Transaction submitted successfully"}), 200
+        return jsonify({"message": "Transaction submitted successfully"}), 201
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"An error occurred: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 @app.route('/invoices/<int:id>/post', methods=['POST'])
 def post_invoice(id):
@@ -3258,23 +3261,36 @@ def post_invoice(id):
 
 
 
-
 @app.route('/get-transactions', methods=['GET'])
+@jwt_required()
 def get_transactions():
-    transactions = Transaction.query.all()
-    transaction_list = [
-        {
-            "id": txn.id,
-            "credited_account_name": txn.credited_account_name,
-            "debited_account_name": txn.debited_account_name,
-            "amount_credited": txn.amount_credited,
-            "amount_debited": txn.amount_debited,
-            "description": txn.description,
-            "date_issued": txn.date_issued.isoformat() if txn.date_issued else None  # Include date_issued
-        } for txn in transactions
-    ]
-    return jsonify({"transactions": transaction_list})
+    try:
+        # Get current user identity
+        current_user = get_jwt_identity()
+        current_user_id = current_user.get('id')
 
+        # Query transactions filtered by user_id
+        transactions = Transaction.query.filter_by(user_id=current_user_id).all()
+
+        # Prepare the response data
+        transaction_data = [
+            {
+                "id": transaction.id,
+                "credited_account_name": transaction.credited_account_name,
+                "debited_account_name": transaction.debited_account_name,
+                "amount_credited": float(transaction.amount_credited),
+                "amount_debited": float(transaction.amount_debited),
+                "description": transaction.description,
+                "date_issued": transaction.date_issued,
+            }
+            for transaction in transactions
+        ]
+
+        return jsonify({"transactions": transaction_data}), 200
+
+    except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 @app.route('/update-transaction/<int:id>', methods=['PUT'])
 def update_transaction(id):
