@@ -137,14 +137,16 @@ class Estimate(db.Model):
     procurement_method = db.Column(db.String(255), nullable=False)
     item_specifications = db.Column(db.String(255), nullable=False)
     unit_of_measure = db.Column(db.String(50), nullable=False)
-    quantity = db.Column(db.Float, nullable=False)  # Original quantity
-    current_estimated_price = db.Column(db.Float, nullable=False)  # Original price
-    total_estimates = db.Column(db.Float, nullable=False)  # Original total estimates
-    adjusted_quantity = db.Column(db.Float, nullable=True)  # Adjusted quantity
-    adjusted_price = db.Column(db.Float, nullable=True)  # Adjusted price
-    adjusted_total_estimates = db.Column(db.Float, nullable=True)  # Adjusted total estimates
+    quantity = db.Column(db.Float, nullable=False)
+    current_estimated_price = db.Column(db.Float, nullable=False)
+    total_estimates = db.Column(db.Float, nullable=False)
+    adjusted_quantity = db.Column(db.Float, nullable=True)
+    adjusted_price = db.Column(db.Float, nullable=True)
+    adjusted_total_estimates = db.Column(db.Float, nullable=True)
     parent_account = db.Column(db.String(255), nullable=True)
     sub_account = db.Column(db.String(255), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user = db.relationship('User', backref=db.backref('estimates', lazy=True))
 
     def to_dict(self):
         return {

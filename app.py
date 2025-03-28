@@ -3331,9 +3331,12 @@ from flask import jsonify, request, abort
 from datetime import datetime
 
 @app.route('/estimates', methods=['GET'])
+@jwt_required()
 def get_estimates():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
     """Retrieve all estimates with their adjusted values."""
-    estimates = Estimate.query.all()
+    estimates = Estimate.query.filter_by(user_id=current_user_id).all()
     return jsonify([{
         'id': estimate.id,
         'department': estimate.department,
@@ -3351,9 +3354,12 @@ def get_estimates():
     } for estimate in estimates])
 
 @app.route('/estimates/<int:id>', methods=['GET'])
+@jwt_required()
 def get_estimate(id):
     """Retrieve a single estimate by ID with its adjusted values."""
-    estimate = Estimate.query.get_or_404(id)
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
     return jsonify({
         'id': estimate.id,
         'department': estimate.department,
@@ -3370,51 +3376,32 @@ def get_estimate(id):
         'adjusted_total_estimates': estimate.adjusted_total_estimates
     })
 
-@app.route('/estimates/<int:id>/adjustments', methods=['POST'])
-def create_adjustment(id):
-    """
-    Create an adjustment for a specific estimate.
-    Adjustment types: 'price' or 'quantity'.
-    Adjustment value can be positive or negative.
-    """
-    estimate = Estimate.query.get_or_404(id)
-    data = request.get_json()
-
-    # Validate required fields
-    if not all(key in data for key in ['adjustment_type', 'adjustment_value']):
-        return jsonify({'error': 'Missing required fields: adjustment_type and adjustment_value'}), 400
-
-    adjustment_type = data['adjustment_type']
-    adjustment_value = data['adjustment_value']
-
-    # Validate adjustment type
-    if adjustment_type not in ['price', 'quantity']:
-        return jsonify({'error': 'Invalid adjustment_type. Must be "price" or "quantity".'}), 400
-
-    # Create the adjustment
-    new_adjustment = Adjustment(
-        estimate_id=estimate.id,
-        adjustment_type=adjustment_type,
-        adjustment_value=adjustment_value,
-        created_at=datetime.utcnow(),
-        created_by=data.get('created_by')  # Optional field
-    )
-    db.session.add(new_adjustment)
-    db.session.commit()
-
-    return jsonify({'message': 'Adjustment created successfully!', 'adjustment': {
-        'id': new_adjustment.id,
-        'estimate_id': new_adjustment.estimate_id,
-        'adjustment_type': new_adjustment.adjustment_type,
-        'adjustment_value': new_adjustment.adjustment_value,
-        'created_at': new_adjustment.created_at,
-        'created_by': new_adjustment.created_by
-    }}), 201
 
 @app.route('/estimates/<int:id>/adjustments', methods=['GET'])
+@jwt_required()
 def get_adjustments(id):
     """Retrieve all adjustments for a specific estimate."""
-    estimate = Estimate.query.get_or_404(id)
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
+    adjustments = estimate.adjustments  # Access adjustments via relationship
+    return jsonify([{
+        'id': adj.id,
+        'estimate_id': adj.estimate_id,
+        'adjustment_type': adj.adjustment_type,
+        'adjustment_value': adj.adjustment_value,
+        'created_at': adj.created_at,
+        'created_by': adj.created_by
+    } for adj in adjustments])
+
+
+@app.route('/estimates/<int:id>/adjustments', methods=['GET'])
+@jwt_required()
+def get_each_adjustments(id):
+    """Retrieve all adjustments for a specific estimate."""
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
     adjustments = estimate.adjustments  # Access adjustments via relationship
     return jsonify([{
         'id': adj.id,
@@ -3426,12 +3413,15 @@ def get_adjustments(id):
     } for adj in adjustments])
 
 @app.route('/estimates/<int:id>', methods=['PUT'])
+@jwt_required()
 def update_estimate(id):
     """
     Update an existing estimate.
     Only the adjusted_quantity and adjusted_price fields are updated.
     """
-    estimate = Estimate.query.get_or_404(id)
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
     data = request.get_json()
 
     # Validate required fields for adjustments
@@ -3457,16 +3447,19 @@ def update_estimate(id):
         'message': 'Estimate updated successfully!',
         'estimate': estimate.to_dict()
     }), 200
-    
+
     
     
 @app.route('/estimates/<int:id>/adjustments/<int:adj_id>', methods=['DELETE'])
+@jwt_required()
 def delete_adjustment(id, adj_id):
     """
     Delete an adjustment for a specific estimate.
     """
-    estimate = Estimate.query.get_or_404(id)
-    adjustment = Adjustment.query.get_or_404(adj_id)
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
+    adjustment = Adjustment.query.filter_by(id=adj_id, estimate_id=estimate.id).first_or_404()
 
     # Ensure the adjustment belongs to the specified estimate
     if adjustment.estimate_id != estimate.id:
@@ -4280,11 +4273,16 @@ def update_trial_balance(account, debit, credit):
     trial_balance[account]['credit'] += credit
 
 @app.route('/trial-balance', methods=['GET'])
+@jwt_required()
 def get_trial_balance():
     global trial_balance
     trial_balance = {}  # Reset trial balance for each request
 
     try:
+        # Get current user identity
+        current_user = get_jwt_identity()
+        current_user_id = current_user.get('id')
+
         # Debug: Print data from each table
         print("Transactions:")
         transactions = db.session.query(
@@ -4292,7 +4290,9 @@ def get_trial_balance():
             func.sum(Transaction.amount_debited).label('total_debit'),
             Transaction.credited_account_name,
             func.sum(Transaction.amount_credited).label('total_credit')
-        ).group_by(Transaction.debited_account_name, Transaction.credited_account_name).all()
+        ).filter_by(user_id=current_user_id).group_by(
+            Transaction.debited_account_name, Transaction.credited_account_name
+        ).all()
         print(transactions)
 
         for transaction in transactions:
@@ -4303,7 +4303,7 @@ def get_trial_balance():
         invoices_issued = db.session.query(
             InvoiceIssued.account_debited,
             InvoiceIssued.account_credited  # Fetch the credited accounts as a JSON field
-        ).all()
+        ).filter_by(user_id=current_user_id).all()
         print(invoices_issued)
 
         for invoice in invoices_issued:
@@ -4322,7 +4322,9 @@ def get_trial_balance():
             InvoiceReceived.account_debited,
             func.sum(InvoiceReceived.amount).label('total_debit'),
             InvoiceReceived.account_credited
-        ).group_by(InvoiceReceived.account_debited, InvoiceReceived.account_credited).all()
+        ).filter_by(user_id=current_user_id).group_by(
+            InvoiceReceived.account_debited, InvoiceReceived.account_credited
+        ).all()
         print(invoices_received)
 
         for invoice in invoices_received:
@@ -4336,7 +4338,9 @@ def get_trial_balance():
             CashReceiptJournal.account_debited,
             func.sum(CashReceiptJournal.total).label('total_debit'),
             CashReceiptJournal.account_credited
-        ).group_by(CashReceiptJournal.account_debited, CashReceiptJournal.account_credited).all()
+        ).filter_by(created_by=current_user_id).group_by(
+            CashReceiptJournal.account_debited, CashReceiptJournal.account_credited
+        ).all()
         print(cash_receipts)
 
         for receipt in cash_receipts:
@@ -4349,7 +4353,9 @@ def get_trial_balance():
             CashDisbursementJournal.account_debited,
             func.sum(CashDisbursementJournal.total).label('total_debit'),
             CashDisbursementJournal.account_credited
-        ).group_by(CashDisbursementJournal.account_debited, CashDisbursementJournal.account_credited).all()
+        ).filter_by(created_by=current_user_id).group_by(
+            CashDisbursementJournal.account_debited, CashDisbursementJournal.account_credited
+        ).all()
         print(cash_disbursements)
 
         for disbursement in cash_disbursements:
@@ -4381,19 +4387,18 @@ def get_trial_balance():
 
 
 
-
 @app.route('/income-statement/accounts', methods=['GET'])
 @jwt_required()
 def get_income_accounts_debited_credited():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
 
-    # Query all transactions from each model
-    invoices_issued = db.session.query(InvoiceIssued).all()
-    invoices_received = db.session.query(InvoiceReceived).all()
-    cash_receipts = db.session.query(CashReceiptJournal).all()
-    cash_disbursements = db.session.query(CashDisbursementJournal).all()
-    transactions = db.session.query(Transaction).all()  # Include the Transaction model
+    # Query all transactions from each model, filtered by user_id
+    invoices_issued = db.session.query(InvoiceIssued).filter_by(user_id=current_user_id).all()
+    invoices_received = db.session.query(InvoiceReceived).filter_by(user_id=current_user_id).all()
+    cash_receipts = db.session.query(CashReceiptJournal).filter_by(created_by=current_user_id).all()
+    cash_disbursements = db.session.query(CashDisbursementJournal).filter_by(created_by=current_user_id).all()
+    transactions = db.session.query(Transaction).filter_by(user_id=current_user_id).all()
 
     # Debugging: Check the number of transactions fetched
     print(f"Invoices Issued: {len(invoices_issued)}")
@@ -4412,7 +4417,6 @@ def get_income_accounts_debited_credited():
             account_code = account_code.get('name', '')
         elif isinstance(account_code, list):  # Handle JSON array
             account_code = account_code[0].get('name', '') if account_code else ''
-
         if account_code:
             account_code_str = str(account_code)
             for acc in all_accounts:
@@ -4597,7 +4601,6 @@ def get_income_accounts_debited_credited():
 
 
 
-
 @app.route('/balance-statement/accounts', methods=['GET'])
 @jwt_required()
 def get_balance_accounts_debited_credited():
@@ -4606,12 +4609,12 @@ def get_balance_accounts_debited_credited():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Query all transactions
+        # Query all transactions, filtered by user_id
         invoices_issued = db.session.query(InvoiceIssued).filter_by(user_id=current_user_id).all()
         invoices_received = db.session.query(InvoiceReceived).filter_by(user_id=current_user_id).all()
         cash_receipts = db.session.query(CashReceiptJournal).filter_by(created_by=current_user_id).all()
         cash_disbursements = db.session.query(CashDisbursementJournal).filter_by(created_by=current_user_id).all()
-        transactions = db.session.query(Transaction).all()
+        transactions = db.session.query(Transaction).filter_by(user_id=current_user_id).all()
 
         # Debugging: Check the number of transactions fetched
         logging.debug(f"Invoices Issued: {len(invoices_issued)}")
@@ -4631,12 +4634,14 @@ def get_balance_accounts_debited_credited():
             "account_type": None,    # Account type (e.g., Assets, Liabilities)
             "account_name": None     # Account name (e.g., 1005- Operations Acc)
         })
+
         def is_account_in_range(account_name):
-                    try:
-                        account_number = int(account_name.split('-')[0].strip())
-                        return 100 <= account_number <= 399
-                    except (ValueError, IndexError):
-                        return False
+            try:
+                account_number = int(account_name.split('-')[0].strip())
+                return 100 <= account_number <= 399
+            except (ValueError, IndexError):
+                return False
+
         # Populate account_groups with parent accounts and sub-accounts
         for acc in all_accounts:
             if acc.account_name and acc.account_name.split('-')[0].isdigit():
@@ -4645,10 +4650,9 @@ def get_balance_accounts_debited_credited():
                     "parent_account": acc.parent_account,  # Parent account name
                     "note_number": acc.note_number,        # Note number
                     "total_amount": 0.0,                   # Initialize total amount
-                    "account_type": acc.account_type,       # Account type
-                    "account_name": acc.account_name        # Account name
+                    "account_type": acc.account_type,      # Account type
+                    "account_name": acc.account_name       # Account name
                 }
-                
                 # Add sub-accounts to account_groups
                 for subaccount in acc.sub_account_details:
                     subaccount_name = subaccount.get('name', '').strip()  # Normalize subaccount name
@@ -4657,8 +4661,8 @@ def get_balance_accounts_debited_credited():
                             "parent_account": acc.parent_account,  # Parent account name
                             "note_number": acc.note_number,        # Note number
                             "total_amount": 0.0,                   # Initialize total amount
-                            "account_type": acc.account_type,       # Account type
-                            "account_name": account_name       # Sub-account name
+                            "account_type": acc.account_type,      # Account type
+                            "account_name": account_name           # Sub-account name
                         }
 
         # Log all account names in account_groups
@@ -4673,10 +4677,8 @@ def get_balance_accounts_debited_credited():
                     account_name = account_name.get('name', '')
                 elif isinstance(account_name, list):
                     account_name = account_name[0].get('name', '') if account_name else ''
-                
                 # Trim whitespace and normalize case
                 account_name = account_name.strip()
-
                 # Check if the account exists in account_groups
                 if account_name in account_groups:
                     account_groups[account_name]["total_amount"] += (debit_amount - credit_amount)
@@ -4745,11 +4747,9 @@ def get_balance_accounts_debited_credited():
         # Debugging: Check the final account groups
         logging.debug(f"Account Groups: {account_groups}")
         return jsonify(account_groups)
-
     except Exception as e:
         logging.error(f"An error occurred: {e}")
         return jsonify({"error": "An unexpected error occurred"}), 500
-
 
 
 import logging
@@ -4759,13 +4759,17 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @app.route('/transactions/accounts', methods=['GET'])
+@jwt_required()
 def get_accounts():
-    # Query all transactions from each model
-    invoices_issued = InvoiceIssued.query.all()
-    invoices_received = InvoiceReceived.query.all()
-    cash_receipts = CashReceiptJournal.query.all()
-    cash_disbursements = CashDisbursementJournal.query.all()
-    transactions = Transaction.query.all()
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Query all transactions from each model, filtered by user_id
+    invoices_issued = InvoiceIssued.query.filter_by(user_id=current_user_id).all()
+    invoices_received = InvoiceReceived.query.filter_by(user_id=current_user_id).all()
+    cash_receipts = CashReceiptJournal.query.filter_by(created_by=current_user_id).all()
+    cash_disbursements = CashDisbursementJournal.query.filter_by(created_by=current_user_id).all()
+    transactions = Transaction.query.filter_by(user_id=current_user_id).all()
 
     # Retrieve all accounts once to optimize performance
     accounts = ChartOfAccounts.query.all()
@@ -4847,7 +4851,6 @@ def get_accounts():
     # Add parent account balances to the final list
     for parent_account, balances in parent_account_balances.items():
         parent_balance = round(balances['debit'] - balances['credit'], 2)
-
         final_account_balances.append({
             'account': parent_account,
             'debit': round(balances['debit'], 2),
@@ -4949,9 +4952,7 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
         account_balances[account_code]["credit"] += credit_amount
 
 # Run the application
-import re
-from flask import jsonify
-from sqlalchemy import func
+
 
 # Classification mapping for parent account code ranges
 CASH_FLOW_CATEGORIES = {
@@ -4984,11 +4985,11 @@ def get_cash_flow_category(parent_account):
     return None
 
 @app.route('/cash-flow', methods=['GET'])
+@jwt_required()
 def get_cash_flow_statement():
-    """
-    Generate a cash flow statement by aggregating inflows and outflows from the database.
-    :return: JSON response containing the cash flow statement.
-    """
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     # Initialize the results for each category
     cash_flow = {
         'Operating Activities': [],
@@ -4996,19 +4997,19 @@ def get_cash_flow_statement():
         'Financing Activities': []
     }
 
-    # Query for Cash Receipt Journal (Inflows)
+    # Query for Cash Receipt Journal (Inflows), filtered by user_id
     inflows = db.session.query(
         CashReceiptJournal.parent_account,
         func.sum(CashReceiptJournal.cash).label('total_cash'),
         func.sum(CashReceiptJournal.bank).label('total_bank')
-    ).group_by(CashReceiptJournal.parent_account).all()
+    ).filter_by(created_by=current_user_id).group_by(CashReceiptJournal.parent_account).all()
 
-    # Query for Cash Disbursement Journal (Outflows)
+    # Query for Cash Disbursement Journal (Outflows), filtered by user_id
     outflows = db.session.query(
         CashDisbursementJournal.parent_account,
         func.sum(CashDisbursementJournal.cash).label('total_cash'),
         func.sum(CashDisbursementJournal.bank).label('total_bank')
-    ).group_by(CashDisbursementJournal.parent_account).all()
+    ).filter_by(created_by=current_user_id).group_by(CashDisbursementJournal.parent_account).all()
 
     # Helper function to process transactions (inflows or outflows)
     def process_transactions(transactions, transaction_type):
@@ -5071,16 +5072,20 @@ def get_cash_flow_statement():
     # Return the cash flow statement as a JSON response
     return jsonify(ordered_cash_flow)
 
+
 @app.route('/departmental-budget', methods=['GET'])
+@jwt_required()
 def departmental_budget():
-    # Query the departmental budgets
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Filter estimates by the current user's ID
     departmental_budget = db.session.query(
         Estimate.department,
-        db.func.sum(Estimate.total_estimates).label('total_budget'),
-        db.func.sum(Estimate.adjusted_total_estimates).label('adjusted_total_budget')
-    ).group_by(Estimate.department).all()
+        func.sum(Estimate.total_estimates).label('total_budget'),
+        func.sum(Estimate.adjusted_total_estimates).label('adjusted_total_budget')
+    ).filter_by(user_id=current_user_id).group_by(Estimate.department).all()
 
-    # Format the results with both estimated and adjusted total amounts
     report_data = [
         {
             'department': row.department,
@@ -5089,13 +5094,16 @@ def departmental_budget():
         }
         for row in departmental_budget
     ]
-
     return jsonify(report_data)
 
 
 @app.route('/consolidated-budget', methods=['GET'])
+@jwt_required()
 def consolidated_budget():
-    # Query the database to fetch all estimates
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Query the database to fetch estimates filtered by the current user's ID
     estimates = db.session.query(
         Estimate.parent_account,
         Estimate.total_estimates,
@@ -5103,7 +5111,7 @@ def consolidated_budget():
         Estimate.current_estimated_price,
         Estimate.adjusted_quantity,
         Estimate.adjusted_price
-    ).all()
+    ).filter_by(user_id=current_user_id).all()
 
     # Initialize variables for categorization
     capital_budget = {"total_original": 0.0, "total_adjusted": 0.0, "accounts": {}}
@@ -5114,8 +5122,6 @@ def consolidated_budget():
     for estimate in estimates:
         parent_account = estimate.parent_account
         original_total = float(estimate.total_estimates)
-
-        # Calculate adjusted total using adjusted quantity and price
         adjusted_total = (estimate.adjusted_quantity or estimate.quantity) * (estimate.adjusted_price or estimate.current_estimated_price)
 
         # Categorize the parent account
@@ -5166,11 +5172,15 @@ def consolidated_budget():
             "adjusted_total": adjusted_surplus_deficit
         }
     }
-
     return jsonify(report_data)
 
+
 @app.route('/budget-vs-actuals', methods=['GET'])
+@jwt_required()
 def budget_vs_actuals():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
     try:
         # Define valid parent account prefixes
         valid_prefixes = ('4300', '4400', '4050', '5000', '7500', '1400', '4500', '1000')
@@ -5188,6 +5198,7 @@ def budget_vs_actuals():
             Estimate.total_estimates.label('original_budget'),
             Estimate.adjusted_total_estimates.label('adjusted_budget')
         ).filter(
+            Estimate.user_id == current_user_id,  # Filter by the current user's ID
             or_(*[Estimate.parent_account.like(f"{prefix}%") for prefix in valid_prefixes])
         )
         estimates = estimates_query.all()
@@ -5218,12 +5229,12 @@ def budget_vs_actuals():
         # Initialize a dictionary to track account balances
         account_balances = defaultdict(lambda: {"debit": 0.0, "credit": 0.0})
 
-        # Query all transactions from each model
-        invoices_issued = InvoiceIssued.query.all()
-        invoices_received = InvoiceReceived.query.all()
-        cash_receipts = CashReceiptJournal.query.all()
-        cash_disbursements = CashDisbursementJournal.query.all()
-        transactions = Transaction.query.all()
+        # Query all transactions from each model, filtered by the current user's ID
+        invoices_issued = InvoiceIssued.query.filter_by(user_id=current_user_id).all()
+        invoices_received = InvoiceReceived.query.filter_by(user_id=current_user_id).all()
+        cash_receipts = CashReceiptJournal.query.filter_by(created_by=current_user_id).all()
+        cash_disbursements = CashDisbursementJournal.query.filter_by(created_by=current_user_id).all()
+        transactions = Transaction.query.filter_by(user_id=current_user_id).all()
 
         # Combine all transactions into a single list
         all_transactions = (
@@ -5274,7 +5285,6 @@ def budget_vs_actuals():
             actual_amount = actuals_dict.get(normalized_parent_account, 0.0)
             performance_difference = final_budget - actual_amount
             utilization_difference = round((performance_difference / final_budget) * 100, 2) if final_budget > 0 else 0.0
-
             report_data.append({
                 'parent_account': parent_account,
                 'original_budget': original_budget,
@@ -5284,7 +5294,6 @@ def budget_vs_actuals():
                 'performance_difference': performance_difference,
                 'utilization_difference': utilization_difference
             })
-
         return jsonify(report_data)
 
     except SQLAlchemyError as e:
@@ -5296,12 +5305,12 @@ def budget_vs_actuals():
 
 
 # ===================== HELPER FUNCTIONS =====================
+
 def extract_transaction_details(transaction):
     """Extract transaction details (amount, debited account, credited accounts) based on type."""
     amount = 0
     debited_account = None
     credited_accounts = []
-
     if isinstance(transaction, InvoiceIssued):
         amount = transaction.amount
         debited_account = transaction.account_debited
@@ -5354,9 +5363,9 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
         if account_code:  # Ensure the code is not empty
             account_balances[account_code]["debit"] += abs(debit_amount)  # Ensure positive debit
             account_balances[account_code]["credit"] += abs(credit_amount)  # Ensure positive credit
-    elif account_code:  
-        account_balances[account_code]["debit"] += abs(debit_amount)  
-        account_balances[account_code]["credit"] += abs(credit_amount)  
-    
+    elif account_code:
+        account_balances[account_code]["debit"] += abs(debit_amount)
+        account_balances[account_code]["credit"] += abs(credit_amount)
+        
 if __name__ == '__main__':
     app.run(debug=True)
