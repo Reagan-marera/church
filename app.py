@@ -2,7 +2,7 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Church,TithePledge,Payment,Payee,Customer,InvoiceReceived,Transaction,Estimate,Adjustment
+from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Payee,Customer,InvoiceReceived,Transaction,Estimate,Adjustment
 from functools import wraps
 from werkzeug.security import generate_password_hash
 from flask_mail import Mail, Message
@@ -49,7 +49,15 @@ def role_required(role):
         @wraps(fn)
         @jwt_required()
         def decorated(*args, **kwargs):
-            current_user = User.query.filter_by(username=get_jwt_identity()).first()
+            identity = get_jwt_identity()
+            
+            # Handle both string and dictionary identities
+            if isinstance(identity, dict):
+                username = identity.get('username')
+            else:
+                username = identity
+                
+            current_user = User.query.filter_by(username=username).first()
             if not current_user or current_user.role != role:
                 return jsonify({'message': 'Access forbidden: Insufficient privileges'}), 403
             return fn(*args, **kwargs)
@@ -259,9 +267,15 @@ def store_otp(email, otp):
  
  
  
+from flask import request, jsonify
+from werkzeug.security import generate_password_hash
+import logging
+
+# Assuming you have a secret code for CEO registration
+CEO_SECRET_CODE = "moses2ceo"
+
 @app.route('/register', methods=['POST'])
 def register_user():
-    
     try:
         data = request.get_json()
         if not data:
@@ -278,73 +292,18 @@ def register_user():
         if User.query.filter_by(email=data['email']).first():
             return jsonify({'message': 'Email already exists'}), 400
 
-        # Handle Church creation if the user is Church CEO
-        if data['role'] == 'Church CEO':
-            # Ensure Church information is provided
-            church_data = data.get('church')
-            if not church_data or not all(field in church_data for field in ['name', 'address', 'phone_number', 'email']):
-                return jsonify({'error': 'Missing church information'}), 400
+        # Handle CEO registration with a secret code
+        if data['role'] == 'CEO':
+            secret_code = data.get('secret_code')
+            if not secret_code or secret_code != CEO_SECRET_CODE:
+                return jsonify({'error': 'Invalid or missing secret code for CEO registration'}), 403
 
-            # Check if the church already exists (based on the email, which should be unique for each church)
-            existing_church = Church.query.filter_by(email=church_data['email']).first()
-            if existing_church:
-                return jsonify({'message': 'A church with this email already exists'}), 400
-
-            # Create new Church if it doesn't exist
-            church = Church(
-                name=church_data['name'],
-                address=church_data['address'],
-                phone_number=church_data['phone_number'],
-                email=church_data['email']
-            )
-            db.session.add(church)
-            db.session.commit()
-
-            # Create the Church CEO user and link them to the church
-            user = User(
-                username=data['username'],
-                email=data['email'],
-                role=data['role'],
-                church_id=church.id  # Link the Church CEO to the newly created church
-            )
-        
-        else:
-            # Create user for role 'Member' or other roles
-            if data['role'] == 'Member':
-                if not all(field in data for field in ['residence', 'phone_number', 'occupation', 'member_number', 'church_name']):
-                    return jsonify({'error': 'Missing member-specific fields or church_name'}), 400
-
-                # Look up the church by name
-                church_name = data['church_name']
-                church = Church.query.filter_by(name=church_name).first()
-
-                if not church:
-                    return jsonify({'error': 'Church not found with the provided name'}), 400
-
-                # Check if the member_number already exists in the same church
-                existing_member = User.query.filter_by(member_number=data['member_number'], church_id=church.id).first()
-                if existing_member:
-                    return jsonify({'error': 'Member number already exists in this church'}), 400
-
-                # Create the Member user and link to the found church
-                user = User(
-                    username=data['username'],
-                    email=data['email'],
-                    role=data['role'],
-                    residence=data['residence'],
-                    phone_number=data['phone_number'],
-                    occupation=data['occupation'],
-                    member_number=data['member_number'],
-                    church_id=church.id  # Link the member to the existing church
-                )
-
-            else:
-                # Create user for any other roles
-                user = User(
-                    username=data['username'],
-                    email=data['email'],
-                    role=data['role']
-                )
+        # Create user for role 'User' or 'CEO'
+        user = User(
+            username=data['username'],
+            email=data['email'],
+            role=data['role']
+        )
 
         # Hash the password and save the user
         user.set_password(data['password'])
@@ -379,10 +338,27 @@ def login_user():
         return jsonify({'token': token, 'role': user.role}), 200
 
     return jsonify({'message': 'Invalid username or password'}), 401
-# CEO-specific routes
+
+
 @app.route('/users', methods=['GET'])
-@role_required('Church CEO')
+@role_required('CEO')
 def get_all_users():
+    # Get the JWT identity (which is a dictionary)
+    current_user_data = get_jwt_identity()
+    
+    # Verify we got a dictionary with the expected fields
+    if not isinstance(current_user_data, dict) or 'username' not in current_user_data:
+        return jsonify({'status': 'error', 'message': 'Invalid JWT payload.'}), 400
+    
+    # Extract the username from the dictionary
+    username = current_user_data['username']
+    
+    # Query the user by username (now properly extracted)
+    current_user = User.query.filter_by(username=username).first()
+    if not current_user:
+        return jsonify({'status': 'error', 'message': 'User not found.'}), 404
+
+    # Proceed with the route logic and return a list of all users
     users = User.query.all()
     return jsonify([{
         'id': user.id,
@@ -391,63 +367,173 @@ def get_all_users():
         'role': user.role
     } for user in users])
 
+
 @app.route('/users/<int:id>', methods=['DELETE'])
-@role_required('Church CEO')
+@role_required('CEO')
 def delete_user(id):
-    user = User.query.get_or_404(id)
-    db.session.delete(user)
+    # The @role_required decorator already verifies the CEO role,
+    # so we don't need to check it again here
+    
+    # Get the user to be deleted
+    user_to_delete = User.query.get(id)
+    if not user_to_delete:
+        return jsonify({'status': 'error', 'message': 'User not found.'}), 404
+
+    # Get current user's ID from JWT
+    current_user_data = get_jwt_identity()
+    current_user_id = current_user_data.get('id')
+
+    # Prevent self-deletion (optional safety check)
+    if current_user_id == id:
+        return jsonify({'status': 'error', 'message': 'You cannot delete yourself.'}), 400
+
+    # Perform the deletion
+    db.session.delete(user_to_delete)
     db.session.commit()
-    return jsonify({'message': 'User deleted successfully'})
 
-# Route to get all transactions
+    return jsonify({'message': 'User deleted successfully'}), 200
+
+
+
 @app.route('/transactions', methods=['GET'])
-@role_required('Church CEO')
+@jwt_required()
 def get_all_transactions():
-    # Query all required models
-    invoices = InvoiceIssued.query.all()
-    cash_receipts = CashReceiptJournal.query.all()
-    cash_disbursements = CashDisbursementJournal.query.all()
+    try:
+        # Extract the JWT identity
+        current_user_data = get_jwt_identity()
 
-    # Prepare the transactions dictionary
-    transactions = {
-        'invoices_issued': [{
-            'id': invoice.id,
-            'invoice_number': invoice.invoice_number,
-            'date_issued': invoice.date_issued,
-            'amount': invoice.amount,
-            'account_debited': invoice.account_debited,
-            'account_credited': invoice.account_credited,
-        } for invoice in invoices],
-        
-        'cash_receipts': [{
-            'id': receipt.id,
-            'receipt_date': receipt.receipt_date,
-            'receipt_no': receipt.receipt_no,
-            'from_whom_received': receipt.from_whom_received,
-            'description': receipt.description,
-            'receipt_type': receipt.receipt_type,
-            'account_debited': receipt.account_debited,
-            'account_credited': receipt.account_credited,
-            'cash': receipt.cash,
-            'total': receipt.total,
-        } for receipt in cash_receipts],
-        
-        'cash_disbursements': [{
-            'id': disbursement.id,
-            'disbursement_date': disbursement.disbursement_date,
-            'cheque_no': disbursement.cheque_no,
-            'to_whom_paid': disbursement.to_whom_paid,
-            'payment_type': disbursement.payment_type,
-            'description': disbursement.description,
-            'account_debited': disbursement.account_debited,
-            'account_credited': disbursement.account_credited,
-            'cash': disbursement.cash,
-            'bank': disbursement.bank,
-        } for disbursement in cash_disbursements]
-    }
+        # Ensure current_user_data is a dictionary and extract the user ID and role
+        if isinstance(current_user_data, dict):
+            current_user_id = current_user_data.get('id')
+            current_user_role = current_user_data.get('role')
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid JWT payload.'}), 400
 
-    return jsonify(transactions)
+        # Check if the user has the CEO role
+        if current_user_role != 'CEO':
+            return jsonify({'status': 'error', 'message': 'Access denied. Only CEOs can access this endpoint.'}), 403
 
+        # Debugging: Print the current_user_id to ensure it's correct
+        print(f"Current User ID: {current_user_id}")
+
+        # Query the user by ID
+        current_user = User.query.get(current_user_id)
+        if not current_user:
+            return jsonify({'status': 'error', 'message': 'User not found.'}), 404
+
+        # Query all required models
+        invoices_issued = InvoiceIssued.query.all()
+        invoices_received = InvoiceReceived.query.all()
+        cash_receipts = CashReceiptJournal.query.all()
+        cash_disbursements = CashDisbursementJournal.query.all()
+        transactions = Transaction.query.all()
+
+        # Prepare the transactions dictionary
+        transactions_data = {
+            'invoices_issued': [
+                {
+                    'id': invoice.id,
+                    'invoice_number': invoice.invoice_number,
+                    'date_issued': invoice.date_issued.strftime('%Y-%m-%d'),
+                    'amount': invoice.amount,
+                    'account_debited': invoice.account_debited,
+                    'account_credited': invoice.account_credited,
+                    'user': {
+                        'id': invoice.user.id,
+                        'username': invoice.user.username,
+                        'email': invoice.user.email,
+                    } if invoice.user else None,
+                }
+                for invoice in invoices_issued
+            ],
+            'invoices_received': [
+                {
+                    'id': invoice.id,
+                    'invoice_number': invoice.invoice_number,
+                    'date_issued': invoice.date_issued.strftime('%Y-%m-%d'),
+                    'name': invoice.name,
+                    'description': invoice.description,
+                    'amount': invoice.amount,
+                    'account_debited': invoice.account_debited,
+                    'account_credited': invoice.account_credited,
+                    'grn_number': invoice.grn_number,
+                    'user': {
+                        'id': invoice.user.id,
+                        'username': invoice.user.username,
+                        'email': invoice.user.email,
+                    } if invoice.user else None,
+                }
+                for invoice in invoices_received
+            ],
+            'cash_receipts': [
+                {
+                    'id': receipt.id,
+                    'receipt_date': receipt.receipt_date.strftime('%Y-%m-%d'),
+                    'receipt_no': receipt.receipt_no,
+                    'from_whom_received': receipt.from_whom_received,
+                    'description': receipt.description,
+                    'receipt_type': receipt.receipt_type,
+                    'account_debited': receipt.account_debited,
+                    'account_credited': receipt.account_credited,
+                    'cash': receipt.cash,
+                    'total': receipt.total,
+                    'user': {
+                        'id': receipt.created_by_user.id,
+                        'username': receipt.created_by_user.username,
+                        'email': receipt.created_by_user.email,
+                    } if receipt.created_by_user else None,
+                }
+                for receipt in cash_receipts
+            ],
+            'cash_disbursements': [
+                {
+                    'id': disbursement.id,
+                    'disbursement_date': disbursement.disbursement_date.strftime('%Y-%m-%d'),
+                    'cheque_no': disbursement.cheque_no,
+                    'to_whom_paid': disbursement.to_whom_paid,
+                    'payment_type': disbursement.payment_type,
+                    'description': disbursement.description,
+                    'account_debited': disbursement.account_debited,
+                    'account_credited': disbursement.account_credited,
+                    'cash': disbursement.cash,
+                    'bank': disbursement.bank,
+                    'user': {
+                        'id': disbursement.created_by_user.id,
+                        'username': disbursement.created_by_user.username,
+                        'email': disbursement.created_by_user.email,
+                    } if disbursement.created_by_user else None,
+                }
+                for disbursement in cash_disbursements
+            ],
+            'transactions': [
+                {
+                    'id': transaction.id,
+                    'credited_account_name': transaction.credited_account_name,
+                    'debited_account_name': transaction.debited_account_name,
+                    'amount_credited': transaction.amount_credited,
+                    'amount_debited': transaction.amount_debited,
+                    'description': transaction.description,
+                    'date_issued': transaction.date_issued.strftime('%Y-%m-%d'),
+                    'user': {
+                        'id': transaction.user.id,
+                        'username': transaction.user.username,
+                        'email': transaction.user.email,
+                    } if transaction.user else None,
+                }
+                for transaction in transactions
+            ],
+            
+          
+            
+        }
+
+        return jsonify(transactions_data), 200
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({'status': 'error', 'message': 'An unexpected error occurred.'}), 500
+
+    
 @app.route('/chart-of-accounts', methods=['GET', 'POST'])
 @jwt_required()
 def manage_chart_of_accounts():
@@ -1489,24 +1575,6 @@ def get_member_info(username):
     if not current_user:
         return jsonify({"error": "User not found"}), 404
 
-    # If the current user is the Church CEO, they can view all members of their church
-    if current_user_role == 'Church CEO':
-        # Fetch all members from the same church (by church_id)
-        members = User.query.filter_by(church_id=current_user.church_id).all()
-        all_members_info = [
-            {
-                "username": member.username,
-                "email": member.email,
-                "role": member.role,
-                "residence": member.residence,
-                "phone_number": member.phone_number,
-                "occupation": member.occupation,
-                "member_number": member.member_number,
-                "church_name": member.church.name if member.church else "Unknown Church"  # Get church name
-            }
-            for member in members
-        ]
-        return jsonify({"all_members_info": all_members_info}), 200
 
     # If the current user is not the CEO, they can only view their own information
     if current_user.username != username:  # Ensure you're comparing username
@@ -1526,236 +1594,11 @@ def get_member_info(username):
             "phone_number": member.phone_number,
             "occupation": member.occupation,
             "member_number": member.member_number,
-            "church_name": member.church.name if member.church else "Unknown Church"  # Get church name
         }
     }), 200
 
-@app.route('/create-pledge', methods=['GET', 'POST'])
-@jwt_required()  # Ensure the user is authenticated using JWT
-def create_or_get_tithe_pledge():
-    current_user_identity = get_jwt_identity()
-    current_user_id = current_user_identity.get('username')  # Get the username of the current user
 
-    if not current_user_id:
-        return jsonify({"error": "Authenticated user does not have a username"}), 400
-
-    # If the method is POST (create a new pledge)
-    if request.method == 'POST':
-        data = request.get_json()  # Get JSON data from the request
-
-        # Ensure required fields are in the request data
-        amount_pledged = data.get('amount_pledged')
-        month = data.get('month')
-        year = data.get('year')
-
-        if not amount_pledged or not month or not year:
-            return jsonify({"error": "Missing required fields: amount_pledged, month, and year"}), 400
-
-        # Ensure amount_pledged is a valid number (float or int)
-        try:
-            amount_pledged = float(amount_pledged)
-        except ValueError:
-            return jsonify({"error": "Invalid amount_pledged format. It should be a valid number."}), 400
-
-        # Find the user by the username from the JWT
-        user = User.query.filter_by(username=current_user_id).first()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-
-        # Find the church associated with the user (assuming the church_id is in the User model)
-        church = Church.query.get(user.church_id)
-        if not church:
-            return jsonify({"error": "Church not found for user"}), 404
-
-        try:
-            # Calculate the total amount (monthly pledge * 12)
-            total_amount = amount_pledged * 12
-
-            # Ensure that total_amount is reasonable (optional: limit range to avoid overflow issues)
-            if total_amount > 1e12:  # Adjust this threshold as necessary
-                return jsonify({"error": "Calculated total amount is too large."}), 400
-
-            # Set the remaining amount to be the same as the total amount initially
-            remaining_amount = total_amount
-
-            # Create the new TithePledge
-            tithe_pledge = TithePledge(
-                amount_pledged=amount_pledged,
-                month=month,
-                year=year,
-                member_id=user.id,  # Using the user ID
-                church_id=church.id,  # Using the church ID
-                total_amount=total_amount,
-                remaining_amount=remaining_amount,
-                timestamp=datetime.utcnow()  # Automatically set the timestamp to current UTC time
-            )
-
-            # Add the new TithePledge to the database
-            db.session.add(tithe_pledge)
-            db.session.commit()
-
-            return jsonify({"message": "Tithe pledge created successfully"}), 201
-
-        except Exception as e:
-            db.session.rollback()  # Rollback in case of an error
-            return jsonify({"error": "Failed to create pledge", "details": str(e)}), 500
-
-    # If the method is GET (retrieve pledges)
-    elif request.method == 'GET':
-        user = User.query.filter_by(username=current_user_id).first()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-
-        pledges = TithePledge.query.filter_by(member_id=user.id).all()
-
-        pledge_list = [{
-            'id': pledge.id,
-            'amount_pledged': pledge.amount_pledged,
-            'month': pledge.month,
-            'year': pledge.year,
-            'total_amount': pledge.total_amount,
-            'remaining_amount': pledge.remaining_amount,  # Show the remaining amount to be paid
-            'username': current_user_id,
-            'timestamp': pledge.timestamp.isoformat() if pledge.timestamp else None  # Check if timestamp is None
-        } for pledge in pledges]
-
-        return jsonify({"pledges": pledge_list}), 200
-
-
-    
-    
-@app.route('/update-pledge/<int:pledge_id>', methods=['PUT'])
-@jwt_required()
-def update_tithe_pledge(pledge_id):
-    data = request.get_json()
-    current_user_identity = get_jwt_identity()
-    current_user_id = current_user_identity.get('username')
-
-    if not current_user_id:
-        return jsonify({"error": "Authenticated user does not have a username"}), 400
-    
-    pledge = TithePledge.query.get(pledge_id)
-    if not pledge:
-        return jsonify({"error": "Pledge not found"}), 404
-
-    if pledge.member_id != current_user_identity['id']:
-        return jsonify({"error": "Unauthorized to update this pledge"}), 403
-
-    amount_pledged = data.get('amount_pledged')
-    month = data.get('month')
-    year = data.get('year')
-    
-    if amount_pledged:
-        pledge.amount_pledged = amount_pledged
-    if month:
-        pledge.month = month
-    if year:
-        pledge.year = year
-
-    try:
-        db.session.commit()
-        return jsonify({"message": "Tithe pledge updated successfully"}), 200
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": "Failed to update pledge", "details": str(e)}), 500
-    
-    
-@app.route('/delete-pledge/<int:pledge_id>', methods=['DELETE'])
-@jwt_required()
-def delete_tithe_pledge(pledge_id):
-    # Retrieve the identity of the current user from the JWT token
-    current_user_identity = get_jwt_identity()
-    current_user_id = current_user_identity.get('id')  # Get the user ID from the JWT token identity
-
-    # Ensure the current user has an ID in the JWT token
-    if not current_user_id:
-        return jsonify({"error": "Authenticated user does not have an ID"}), 400
-
-    # Retrieve the pledge from the database
-    pledge = TithePledge.query.get(pledge_id)
-
-    # If the pledge does not exist, return a 404 error
-    if not pledge:
-        return jsonify({"error": "Pledge not found"}), 404
-
-    # Check if the current user is authorized to delete the pledge (check if the user owns the pledge)
-    if pledge.member_id != current_user_id:
-        return jsonify({"error": "Unauthorized to delete this pledge"}), 403
-
-    # Try to delete the pledge from the database
-    try:
-        db.session.delete(pledge)
-        db.session.commit()
-        return jsonify({"message": "Tithe pledge deleted successfully"}), 200
-    except Exception as e:
-        # In case of an error, roll back the transaction and return a 500 error
-        db.session.rollback()
-        return jsonify({"error": "Failed to delete pledge", "details": str(e)}), 500
-    
-    
-@app.route('/make-payment', methods=['POST'])
-@jwt_required()  # Ensure the user is authenticated
-def make_payment():
-    current_user_identity = get_jwt_identity()
-    current_user_id = current_user_identity.get('username')  # Get the username of the current user
-
-    if not current_user_id:
-        return jsonify({"error": "Authenticated user does not have a username"}), 400
-
-    # Get JSON data from request
-    data = request.get_json()
-
-    # Ensure the required fields are present
-    pledge_id = data.get('pledge_id')
-    amount_paid = data.get('amount_paid')
-
-    if not pledge_id or not amount_paid:
-        return jsonify({"error": "Missing required fields: pledge_id and amount_paid"}), 400
-
-    try:
-        # Ensure amount_paid is a float
-        amount_paid = float(amount_paid)
-    except ValueError:
-        return jsonify({"error": "Invalid amount_paid value, must be a number"}), 400
-
-    # Find the user by the username from the JWT
-    user = User.query.filter_by(username=current_user_id).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # Find the pledge by ID
-    pledge = TithePledge.query.get(pledge_id)
-    if not pledge:
-        return jsonify({"error": "Pledge not found"}), 404
-
-    # Ensure that the pledge belongs to the current user
-    if pledge.member_id != user.id:
-        return jsonify({"error": "You are not authorized to make a payment for this pledge"}), 403
-
-    # Ensure the payment amount is not greater than the remaining amount
-    if amount_paid > pledge.remaining_amount:
-        return jsonify({"error": "Payment amount exceeds the remaining pledge amount"}), 400
-
-    try:
-        # Create the payment record
-        payment = Payment(
-            amount=amount_paid,
-            pledge_id=pledge.id
-        )
-
-        # Add the payment to the database
-        db.session.add(payment)
-        db.session.commit()
-
-        # Update the pledge remaining amount
-        pledge.apply_payment(amount_paid)
-
-        return jsonify({"message": "Payment applied successfully, pledge updated."}), 200
-
-    except Exception as e:
-        db.session.rollback()  # Rollback in case of an error
-        return jsonify({"error": "Failed to process payment", "details": str(e)}), 500
-    
+ 
  
 @app.route('/sendstk', methods=['POST'])
 def sendstk():
