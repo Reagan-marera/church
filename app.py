@@ -427,6 +427,19 @@ def get_all_transactions():
         cash_receipts = CashReceiptJournal.query.all()
         cash_disbursements = CashDisbursementJournal.query.all()
         transactions = Transaction.query.all()
+        chart_of_accounts = ChartOfAccounts.query.all()
+        payees = Payee.query.all()
+        customers = Customer.query.all()
+
+        # Debugging: Print the results of each query
+        print(f"Invoices Issued: {invoices_issued}")
+        print(f"Invoices Received: {invoices_received}")
+        print(f"Cash Receipts: {cash_receipts}")
+        print(f"Cash Disbursements: {cash_disbursements}")
+        print(f"Transactions: {transactions}")
+        print(f"Chart of Accounts: {chart_of_accounts}")
+        print(f"Payees: {payees}")
+        print(f"Customers: {customers}")
 
         # Prepare the transactions dictionary
         transactions_data = {
@@ -522,9 +535,49 @@ def get_all_transactions():
                 }
                 for transaction in transactions
             ],
-            
-          
-            
+            'chart_of_accounts': [
+                {
+                    'id': account.id,
+                    'parent_account': account.parent_account,
+                    'account_name': account.account_name,
+                    'account_type': account.account_type,
+                    'sub_account_details': account.sub_account_details,
+                    'note_number': account.note_number,
+                }
+                for account in chart_of_accounts
+            ],
+            'payees': [
+                {
+                    'id': payee.id,
+                    'parent_account': payee.parent_account,
+                    'account_name': payee.account_name,
+                    'account_type': payee.account_type,
+                    'sub_account_details': payee.sub_account_details,
+                    'user': {
+                        'id': payee.user.id,
+                        'username': payee.user.username,
+                        'email': payee.user.email,
+                    } if payee.user else None,
+                }
+                for payee in payees
+            ],
+            'customers': [
+                {
+                    'id': customer.id,
+                    'name': customer.name,
+                    'balance': customer.balance,
+                    'parent_account': customer.parent_account,
+                    'account_name': customer.account_name,
+                    'account_type': customer.account_type,
+                    'sub_account_details': customer.sub_account_details,
+                    'user': {
+                        'id': customer.user.id,
+                        'username': customer.user.username,
+                        'email': customer.user.email,
+                    } if customer.user else None,
+                }
+                for customer in customers
+            ],
         }
 
         return jsonify(transactions_data), 200
@@ -532,7 +585,6 @@ def get_all_transactions():
     except Exception as e:
         print(f"Error: {str(e)}")
         return jsonify({'status': 'error', 'message': 'An unexpected error occurred.'}), 500
-
     
 @app.route('/chart-of-accounts', methods=['GET', 'POST'])
 @jwt_required()
