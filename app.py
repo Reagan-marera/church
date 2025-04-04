@@ -40,7 +40,6 @@ app.config['MAIL_PASSWORD'] = 'rvzxngpossphfgzm'
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)  # Access token expires in 1 hour
 app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(hours=3)  # Refresh token expires in 3 hours
 
-
 mail = Mail(app)
 logging.basicConfig(level=logging.DEBUG) 
 
