@@ -26,7 +26,7 @@ class User(db.Model):
     cash_receipts = db.relationship('CashReceiptJournal', back_populates='created_by_user')
     invoices_issued = db.relationship('InvoiceIssued', back_populates='user')
     invoices_received = db.relationship('InvoiceReceived', back_populates='user')
-
+    reconciliations = db.relationship('CashbookReconciliation', back_populates='creator')
     def __repr__(self):
         return f'<User {self.username} - {self.role}>'
 
@@ -267,6 +267,23 @@ class CashDisbursementJournal(db.Model):
     __table_args__ = (
         UniqueConstraint('created_by', 'cheque_no', name='unique_receipt_per_user'),
     )
+
+class CashbookReconciliation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    date = db.Column(db.Date, nullable=False)
+    transaction_type = db.Column(db.String(10), nullable=False)  # 'receipt' or 'payment'
+    bank_account = db.Column(db.String(100), nullable=False)
+    details = db.Column(db.String(255), nullable=True)
+    transaction_details = db.Column(db.String(255), nullable=True)
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    manual_number = db.Column(db.String(50), nullable=True)  # Optional, for manual tracking
+
+    # Foreign key to User
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    creator = db.relationship('User', back_populates='reconciliations')
+
+    def __repr__(self):
+        return f"<CashbookReconciliation {self.date} {self.transaction_type} {self.amount}>"
 
 # OTP Model
 class OTP(db.Model):

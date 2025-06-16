@@ -2,46 +2,60 @@ from flask import Flask, jsonify, request
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from models import db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal, CashDisbursementJournal,Payee,Customer,InvoiceReceived,Transaction,Estimate,Adjustment
-from functools import wraps
-from werkzeug.security import generate_password_hash
 from flask_mail import Mail, Message
-from datetime import datetime, timedelta
+from werkzeug.security import generate_password_hash
+from datetime import datetime, timedelta, date
+from functools import wraps
 import random
 import string
+import os
 import re
-import  logging
-from datetime import date
+import logging
 import requests
 import json
-from sqlalchemy.exc import IntegrityError,SQLAlchemyError
-from sqlalchemy import and_
-from sqlalchemy.orm import joinedload
-from sqlalchemy import func, or_, literal, cast, Float, select
-from sqlalchemy.orm.exc import NoResultFound
 from collections import defaultdict
+
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import and_, func, or_, literal, cast, Float, select
+from sqlalchemy.orm import joinedload
+from sqlalchemy.orm.exc import NoResultFound
+
+from models import (
+    db, User, OTP, ChartOfAccounts, InvoiceIssued, CashReceiptJournal,
+    CashDisbursementJournal, Payee, Customer, InvoiceReceived,
+    Transaction, Estimate, Adjustment, CashbookReconciliation
+)
+
+
+
+# Initialize Flask app
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///financial_reporting.db'  
+application = app  
+
+# App Configurations
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///financial_reporting.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'reaganstrongkey'
-mail = Mail(app)  
-mail.init_app(app)
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(hours=3)
+
+# Mail Configuration
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_USERNAME'] = 'transactionsfinance355@gmail.com'
+app.config['MAIL_PASSWORD'] = 'rvzxngpossphfgzm'
+
+# Initialize extensions
+mail = Mail(app)
 db.init_app(app)
 migrate = Migrate(app, db)
 CORS(app)
 jwt = JWTManager(app)
 
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True 
-app.config['MAIL_USE_SSL'] = False
-app.config['MAIL_USERNAME'] = 'transactionsfinance355@gmail.com'  
-app.config['MAIL_PASSWORD'] = 'rvzxngpossphfgzm'  
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)  # Access token expires in 1 hour
-app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(hours=3)  # Refresh token expires in 3 hours
-
-mail = Mail(app)
-logging.basicConfig(level=logging.DEBUG) 
+# Logging
+logging.basicConfig(level=logging.DEBUG)
 
 def role_required(role):
     def wrapper(fn):
@@ -332,7 +346,7 @@ def login_user():
         # Create JWT token with both username and role in the identity
         token = create_access_token(
             identity={"id": user.id, "username": user.username, "role": user.role},
-            expires_delta=timedelta(hours=3)  # Set the token to expire in 3 hours
+            expires_delta=timedelta(hours=4)  # Set the token to expire in 3 hours
         )
         return jsonify({'token': token, 'role': user.role}), 200
 
@@ -412,33 +426,30 @@ def get_all_transactions():
         if current_user_role != 'CEO':
             return jsonify({'status': 'error', 'message': 'Access denied. Only CEOs can access this endpoint.'}), 403
 
-        # Debugging: Print the current_user_id to ensure it's correct
-        print(f"Current User ID: {current_user_id}")
-
-        # Query the user by ID
-        current_user = User.query.get(current_user_id)
+        # Query the user by ID using modern SQLAlchemy syntax
+        current_user = db.session.get(User, current_user_id)
         if not current_user:
             return jsonify({'status': 'error', 'message': 'User not found.'}), 404
 
-        # Query all required models
-        invoices_issued = InvoiceIssued.query.all()
-        invoices_received = InvoiceReceived.query.all()
-        cash_receipts = CashReceiptJournal.query.all()
-        cash_disbursements = CashDisbursementJournal.query.all()
-        transactions = Transaction.query.all()
-        chart_of_accounts = ChartOfAccounts.query.all()
-        payees = Payee.query.all()
-        customers = Customer.query.all()
+        # Query all required models with eager loading
+        invoices_issued = InvoiceIssued.query.options(db.joinedload(InvoiceIssued.user)).all()
+        invoices_received = InvoiceReceived.query.options(db.joinedload(InvoiceReceived.user)).all()
+        cash_receipts = CashReceiptJournal.query.options(db.joinedload(CashReceiptJournal.created_by_user)).all()
+        cash_disbursements = CashDisbursementJournal.query.options(db.joinedload(CashDisbursementJournal.created_by_user)).all()
+        transactions = Transaction.query.options(db.joinedload(Transaction.user)).all()
+        chart_of_accounts = ChartOfAccounts.query.options(db.joinedload(ChartOfAccounts.user)).all()
+        payees = Payee.query.options(db.joinedload(Payee.user)).all()
+        customers = Customer.query.options(db.joinedload(Customer.user)).all()
 
-        # Debugging: Print the results of each query
-        print(f"Invoices Issued: {invoices_issued}")
-        print(f"Invoices Received: {invoices_received}")
-        print(f"Cash Receipts: {cash_receipts}")
-        print(f"Cash Disbursements: {cash_disbursements}")
-        print(f"Transactions: {transactions}")
-        print(f"Chart of Accounts: {chart_of_accounts}")
-        print(f"Payees: {payees}")
-        print(f"Customers: {customers}")
+        # Helper function to format user data
+        def format_user(user):
+            if user:
+                return {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email
+                }
+            return None
 
         # Prepare the transactions dictionary
         transactions_data = {
@@ -450,11 +461,7 @@ def get_all_transactions():
                     'amount': invoice.amount,
                     'account_debited': invoice.account_debited,
                     'account_credited': invoice.account_credited,
-                    'user': {
-                        'id': invoice.user.id,
-                        'username': invoice.user.username,
-                        'email': invoice.user.email,
-                    } if invoice.user else None,
+                    'user': format_user(invoice.user)
                 }
                 for invoice in invoices_issued
             ],
@@ -469,11 +476,7 @@ def get_all_transactions():
                     'account_debited': invoice.account_debited,
                     'account_credited': invoice.account_credited,
                     'grn_number': invoice.grn_number,
-                    'user': {
-                        'id': invoice.user.id,
-                        'username': invoice.user.username,
-                        'email': invoice.user.email,
-                    } if invoice.user else None,
+                    'user': format_user(invoice.user)
                 }
                 for invoice in invoices_received
             ],
@@ -489,11 +492,7 @@ def get_all_transactions():
                     'account_credited': receipt.account_credited,
                     'cash': receipt.cash,
                     'total': receipt.total,
-                    'user': {
-                        'id': receipt.created_by_user.id,
-                        'username': receipt.created_by_user.username,
-                        'email': receipt.created_by_user.email,
-                    } if receipt.created_by_user else None,
+                    'user': format_user(receipt.created_by_user)
                 }
                 for receipt in cash_receipts
             ],
@@ -509,11 +508,7 @@ def get_all_transactions():
                     'account_credited': disbursement.account_credited,
                     'cash': disbursement.cash,
                     'bank': disbursement.bank,
-                    'user': {
-                        'id': disbursement.created_by_user.id,
-                        'username': disbursement.created_by_user.username,
-                        'email': disbursement.created_by_user.email,
-                    } if disbursement.created_by_user else None,
+                    'user': format_user(disbursement.created_by_user)
                 }
                 for disbursement in cash_disbursements
             ],
@@ -526,11 +521,7 @@ def get_all_transactions():
                     'amount_debited': transaction.amount_debited,
                     'description': transaction.description,
                     'date_issued': transaction.date_issued.strftime('%Y-%m-%d'),
-                    'user': {
-                        'id': transaction.user.id,
-                        'username': transaction.user.username,
-                        'email': transaction.user.email,
-                    } if transaction.user else None,
+                    'user': format_user(transaction.user)
                 }
                 for transaction in transactions
             ],
@@ -542,6 +533,7 @@ def get_all_transactions():
                     'account_type': account.account_type,
                     'sub_account_details': account.sub_account_details,
                     'note_number': account.note_number,
+                    'user': format_user(account.user)
                 }
                 for account in chart_of_accounts
             ],
@@ -552,11 +544,7 @@ def get_all_transactions():
                     'account_name': payee.account_name,
                     'account_type': payee.account_type,
                     'sub_account_details': payee.sub_account_details,
-                    'user': {
-                        'id': payee.user.id,
-                        'username': payee.user.username,
-                        'email': payee.user.email,
-                    } if payee.user else None,
+                    'user': format_user(payee.user)
                 }
                 for payee in payees
             ],
@@ -569,11 +557,7 @@ def get_all_transactions():
                     'account_name': customer.account_name,
                     'account_type': customer.account_type,
                     'sub_account_details': customer.sub_account_details,
-                    'user': {
-                        'id': customer.user.id,
-                        'username': customer.user.username,
-                        'email': customer.user.email,
-                    } if customer.user else None,
+                    'user': format_user(customer.user)
                 }
                 for customer in customers
             ],
@@ -3119,11 +3103,17 @@ def submit_transaction():
         amount_credited = data.get("amountCredited")
         amount_debited = data.get("amountDebited")
         description = data.get("description")
-        date_issued = data.get("dateIssued")
+        date_issued_str = data.get("dateIssued")
 
         # Validate required fields
-        if not all([credited_account, debited_account, amount_credited, amount_debited, date_issued]):
+        if not all([credited_account, debited_account, amount_credited, amount_debited, date_issued_str]):
             return jsonify({"error": "Missing required fields"}), 400
+
+        # Convert date string to date object
+        try:
+            date_issued = datetime.strptime(date_issued_str, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
         # Create a new transaction and associate it with the current user
         new_transaction = Transaction(
@@ -3133,7 +3123,7 @@ def submit_transaction():
             amount_debited=float(amount_debited),
             description=description,
             date_issued=date_issued,
-            user_id=current_user_id  # Associate transaction with the current user
+            user_id=current_user_id
         )
 
         # Add and commit the transaction to the database
@@ -3142,8 +3132,18 @@ def submit_transaction():
 
         return jsonify({"message": "Transaction submitted successfully"}), 201
 
+    except ValueError as ve:
+        logging.error(f"Value error: {str(ve)}")
+        return jsonify({"error": "Invalid data format."}), 400
+
+    except IntegrityError as ie:
+        logging.error(f"Database integrity error: {str(ie)}")
+        db.session.rollback()
+        return jsonify({"error": "Database integrity error."}), 400
+
     except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
+        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
+        db.session.rollback()
         return jsonify({"error": "An unexpected error occurred."}), 500
 
 @app.route('/invoices/<int:id>/post', methods=['POST'])
@@ -3359,7 +3359,31 @@ def update_estimate(id):
     }), 200
 
     
-    
+@app.route('/estimates', methods=['POST'])
+@jwt_required()
+def create_estimate():
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+    data = request.get_json()
+
+    new_estimate = Estimate(
+        user_id=current_user_id,
+        department=data['department'],
+        procurement_method=data['procurement_method'],
+        item_specifications=data['item_specifications'],
+        unit_of_measure=data['unit_of_measure'],
+        quantity=data['quantity'],
+        current_estimated_price=data['current_estimated_price'],
+        total_estimates=data['total_estimates'],
+        parent_account=data.get('parent_account'),
+        sub_account=data.get('sub_account'),
+    )
+
+    db.session.add(new_estimate)
+    db.session.commit()
+
+    return jsonify({'message': 'Estimate created', 'id': new_estimate.id}), 201
+
 @app.route('/estimates/<int:id>/adjustments/<int:adj_id>', methods=['DELETE'])
 @jwt_required()
 def delete_adjustment(id, adj_id):
@@ -4534,8 +4558,7 @@ def get_balance_accounts_debited_credited():
         logging.debug(f"Transactions: {len(transactions)}")
 
         # Retrieve all accounts once to optimize performance
-        all_accounts = ChartOfAccounts.query.all()
-
+        all_accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
         # Initialize account_groups with all accounts and sub-accounts
         account_groups = defaultdict(lambda: {
             "parent_account": None,  # Parent account name
@@ -5276,6 +5299,122 @@ def update_account_balances(account_code, debit_amount, credit_amount, account_b
     elif account_code:
         account_balances[account_code]["debit"] += abs(debit_amount)
         account_balances[account_code]["credit"] += abs(credit_amount)
-        
+ 
+def get_book_balance_for_bank(bank_account, cutoff_date):
+    total_receipts = db.session.query(
+        db.func.sum(CashReceiptJournal.total)
+    ).filter(
+        CashReceiptJournal.bank == bank_account,
+        CashReceiptJournal.receipt_date <= cutoff_date
+    ).scalar() or 0.0
+
+    total_disbursements = db.session.query(
+        db.func.sum(CashDisbursementJournal.total)
+    ).filter(
+        CashDisbursementJournal.bank == bank_account,
+        CashDisbursementJournal.disbursement_date <= cutoff_date
+    ).scalar() or 0.0
+
+    return float(total_receipts) - float(total_disbursements)
+
+
+
+
+@app.route('/api/cashbook-reconciliations', methods=['GET'])
+@jwt_required()
+def get_cashbook_reconciliations():
+    try:
+        current_identity = get_jwt_identity()
+        user_id = current_identity['id'] if isinstance(current_identity, dict) else current_identity
+
+        reconciliations = CashbookReconciliation.query.filter_by(created_by=user_id).order_by(
+            CashbookReconciliation.date.desc()
+        ).all()
+
+        return jsonify([{
+            'id': r.id,
+            'date': r.date.strftime('%Y-%m-%d'),
+            'transaction_type': r.transaction_type,
+            'bank_account': r.bank_account,
+            'amount': float(r.amount),
+            'details': r.details,
+            'transaction_details': r.transaction_details,
+            'manual_number': r.manual_number
+        } for r in reconciliations])
+
+    except Exception as e:
+        print(f"Error fetching cashbook reconciliations: {str(e)}")
+        return jsonify({"error": "Failed to fetch reconciliations"}), 500
+
+@app.route('/api/cashbook-reconciliations/<int:reconciliation_id>', methods=['GET'])
+@jwt_required()
+def get_cashbook_reconciliation(reconciliation_id):
+    try:
+        current_identity = get_jwt_identity()
+        user_id = current_identity['id'] if isinstance(current_identity, dict) else current_identity
+
+        reconciliation = CashbookReconciliation.query.filter_by(
+            id=reconciliation_id,
+            created_by=user_id
+        ).first()
+
+        if not reconciliation:
+            return jsonify({"error": "Reconciliation not found"}), 404
+
+        return jsonify({
+            'id': reconciliation.id,
+            'date': reconciliation.date.strftime('%Y-%m-%d'),
+            'transaction_type': reconciliation.transaction_type,
+            'bank_account': reconciliation.bank_account,
+            'amount': float(reconciliation.amount),
+            'details': reconciliation.details,
+            'transaction_details': reconciliation.transaction_details,
+            'manual_number': reconciliation.manual_number
+        })
+
+    except Exception as e:
+        print(f"Error fetching reconciliation: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+@app.route('/api/cashbook-reconciliations', methods=['POST'])
+@jwt_required()
+def create_cashbook_reconciliation():
+    try:
+        data = request.get_json()
+        current_identity = get_jwt_identity()
+        user_id = current_identity['id'] if isinstance(current_identity, dict) else current_identity
+
+        new_entry = CashbookReconciliation(
+            date=datetime.strptime(data['date'], '%Y-%m-%d'),
+            transaction_type=data['transaction_type'],
+            bank_account=data['bank_account'],
+            details=data.get('details'),
+            transaction_details=data.get('transaction_details'),
+            amount=data['amount'],
+            manual_number=data.get('manual_number'),
+            created_by=user_id
+        )
+
+        db.session.add(new_entry)
+        db.session.commit()
+
+        return jsonify({'message': 'Reconciliation added successfully', 'id': new_entry.id}), 201
+
+    except Exception as e:
+        print(f"Error creating reconciliation: {str(e)}")
+        return jsonify({'error': 'Failed to create reconciliation'}), 500
+
+@app.route('/api/cashbook-reconciliations/<int:reconciliation_id>', methods=['DELETE'])
+@jwt_required()
+def delete_cashbook_reconciliation(reconciliation_id):
+    try:
+        reconciliation = CashbookReconciliation.query.get_or_404(reconciliation_id)
+        db.session.delete(reconciliation)
+        db.session.commit()
+        return jsonify({'message': 'Reconciliation deleted successfully'}), 200
+    except Exception as e:
+        print(f"Error deleting reconciliation: {str(e)}")
+        return jsonify({'error': 'Failed to delete reconciliation'}), 500
+
+
 if __name__ == '__main__':
     app.run(debug=True)
