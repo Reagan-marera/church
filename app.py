@@ -285,7 +285,7 @@ from werkzeug.security import generate_password_hash
 import logging
 
 # Assuming you have a secret code for CEO registration
-CEO_SECRET_CODE = "moses2ceo"
+CEO_SECRET_CODE = "moses2ceo@YOUMING"
 
 @app.route('/register', methods=['POST'])
 def register_user():
@@ -346,7 +346,7 @@ def login_user():
         # Create JWT token with both username and role in the identity
         token = create_access_token(
             identity={"id": user.id, "username": user.username, "role": user.role},
-            expires_delta=timedelta(hours=4)  # Set the token to expire in 3 hours
+            expires_delta=timedelta(hours=24)  # Set the token to expire in 3 hours
         )
         return jsonify({'token': token, 'role': user.role}), 200
 
@@ -1214,6 +1214,7 @@ def create_cash_receipt():
             ref_no=data.get('ref_no'),
             from_whom_received=data.get('from_whom_received'),
             description=data.get('description'),
+            department=data.get('department'),  # Include department
             receipt_type=data['receipt_type'],
             account_debited=data.get('account_debited'),
             account_credited=data.get('account_credited'),
@@ -1224,7 +1225,7 @@ def create_cash_receipt():
             name=data.get('name'),
             selected_invoice_id=data.get('selected_invoice_id'),
             manual_number=manual_number,
-            parent_account=data.get('parent_account')  # Add parent_account here
+            parent_account=data.get('parent_account')
         )
 
         new_journal.save()
@@ -1239,7 +1240,6 @@ def create_cash_receipt():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Get (GET)
 @app.route('/cash-receipt-journals', methods=['GET'])
 @jwt_required()
 def get_cash_receipts():
@@ -1247,10 +1247,8 @@ def get_cash_receipts():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Query all receipts created by the current user
         journals = CashReceiptJournal.query.filter_by(created_by=current_user_id).all()
 
-        # Serialize the results
         result = [
             {
                 'id': journal.id,
@@ -1259,6 +1257,7 @@ def get_cash_receipts():
                 'ref_no': journal.ref_no,
                 'from_whom_received': journal.from_whom_received,
                 'description': journal.description,
+                'department': journal.department,  # Include department
                 'receipt_type': journal.receipt_type,
                 'account_debited': journal.account_debited,
                 'account_credited': journal.account_credited,
@@ -1269,7 +1268,7 @@ def get_cash_receipts():
                 'name': journal.name,
                 'selected_invoice_id': journal.selected_invoice_id,
                 'manual_number': journal.manual_number,
-                'parent_account': journal.parent_account  # Add parent_account field
+                'parent_account': journal.parent_account
             }
             for journal in journals
         ]
@@ -1285,12 +1284,10 @@ def delete_cash_receipt(id):
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Find the journal entry by ID and ensure it belongs to the current user
         journal = CashReceiptJournal.query.filter_by(id=id, created_by=current_user_id).first()
         if not journal:
             return jsonify({'error': 'Journal entry not found or unauthorized access.'}), 404
 
-        # Delete the journal entry
         db.session.delete(journal)
         db.session.commit()
 
@@ -1305,15 +1302,12 @@ def update_cash_receipt(id):
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Find the journal entry by ID and ensure it belongs to the current user
         journal = CashReceiptJournal.query.filter_by(id=id, created_by=current_user_id).first()
         if not journal:
             return jsonify({'error': 'Journal entry not found or unauthorized access.'}), 404
 
-        # Parse incoming JSON data
         data = request.get_json()
 
-        # Update fields
         if 'receipt_date' in data:
             try:
                 journal.receipt_date = datetime.strptime(data['receipt_date'], '%Y-%m-%d').date()
@@ -1328,11 +1322,11 @@ def update_cash_receipt(id):
         journal.ref_no = data.get('ref_no', journal.ref_no)
         journal.from_whom_received = data.get('from_whom_received', journal.from_whom_received)
         journal.description = data.get('description', journal.description)
+        journal.department = data.get('department', journal.department)  # Update department
         journal.receipt_type = data.get('receipt_type', journal.receipt_type)
         journal.account_debited = data.get('account_debited', journal.account_debited)
         journal.account_credited = data.get('account_credited', journal.account_credited)
 
-        # Update cash and bank values
         journal.cash = float(data.get('cash', journal.cash))
         journal.bank = float(data.get('bank', journal.bank))
         journal.total = journal.cash + journal.bank
@@ -1340,20 +1334,16 @@ def update_cash_receipt(id):
         journal.cashbook = data.get('cashbook', journal.cashbook)
         journal.name = data.get('name', journal.name)
         journal.selected_invoice_id = data.get('selected_invoice_id', journal.selected_invoice_id)
-        journal.parent_account = data.get('parent_account', journal.parent_account)  # Update parent_account
+        journal.parent_account = data.get('parent_account', journal.parent_account)
 
-        # Save changes
         db.session.commit()
 
         return jsonify({'message': 'Journal entry updated successfully', 'data': journal.__repr__()}), 200
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except NameError:
-        db.session.rollback()
-        return jsonify({'error': 'Database integrity error. Check your data.'}), 400
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
-    
     
 @app.route('/cash-disbursement-journals', methods=['POST'])
 @jwt_required()
@@ -1362,39 +1352,30 @@ def create_disbursement():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Parse incoming JSON data
         data = request.get_json()
 
-        # Validate required fields
         required_fields = ['disbursement_date', 'cheque_no', 'to_whom_paid', 'account_credited']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({'error': f'Missing fields: {", ".join(missing_fields)}'}), 400
 
-        # Validate disbursement_date format
         try:
             disbursement_date = datetime.strptime(data['disbursement_date'], '%Y-%m-%d').date()
         except ValueError:
             return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
-        # Check for duplicate cheque_no for the current user
         if CashDisbursementJournal.query.filter_by(created_by=current_user_id, cheque_no=data['cheque_no']).first():
             return jsonify({'error': f'Cheque number {data["cheque_no"]} already exists for your account.'}), 400
 
-        # Validate cash and bank values
         cash = float(data.get('cash', 0))
         bank = float(data.get('bank', 0))
 
-        # Calculate total
         total = cash + bank
 
-        # Validate manual_number if it exists
         manual_number = data.get('manual_number')
-        if manual_number is not None:
-            if not isinstance(manual_number, str):
-                return jsonify({'error': 'manual_number must be a string'}), 400
+        if manual_number is not None and not isinstance(manual_number, str):
+            return jsonify({'error': 'manual_number must be a string'}), 400
 
-        # Create a new CashDisbursementJournal entry
         new_disbursement = CashDisbursementJournal(
             disbursement_date=disbursement_date,
             cheque_no=data['cheque_no'],
@@ -1403,25 +1384,24 @@ def create_disbursement():
             to_whom_paid=data['to_whom_paid'],
             payment_type=data.get('payment_type'),
             description=data.get('description'),
+            department=data.get('department'),  # Include department
             account_credited=data['account_credited'],
             account_debited=data.get('account_debited'),
-            cashbook=data['cashbook'],
+            cashbook=data.get('cashbook'),
             cash=cash,
             bank=bank,
             total=total,
             created_by=current_user_id,
             manual_number=manual_number,
-            parent_account=data.get('parent_account')  # Add parent_account here
+            parent_account=data.get('parent_account')
         )
 
-        # Save to the database
         new_disbursement.save()
 
         return jsonify({'message': 'Disbursement entry created successfully', 'data': new_disbursement.__repr__()}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Read (GET)
 @app.route('/cash-disbursement-journals', methods=['GET'])
 @jwt_required()
 def get_disbursements():
@@ -1429,10 +1409,8 @@ def get_disbursements():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Fetch all disbursements created by the current user
         disbursements = CashDisbursementJournal.query.filter_by(created_by=current_user_id).all()
 
-        # Serialize the results
         result = [
             {
                 'id': disbursement.id,
@@ -1443,6 +1421,7 @@ def get_disbursements():
                 'to_whom_paid': disbursement.to_whom_paid,
                 'payment_type': disbursement.payment_type,
                 'description': disbursement.description,
+                'department': disbursement.department,  # Include department
                 'account_credited': disbursement.account_credited,
                 'account_debited': disbursement.account_debited,
                 'cashbook': disbursement.cashbook,
@@ -1450,7 +1429,7 @@ def get_disbursements():
                 'bank': disbursement.bank,
                 'total': disbursement.total,
                 'manual_number': disbursement.manual_number,
-                'parent_account': disbursement.parent_account  # Add parent_account field
+                'parent_account': disbursement.parent_account
             }
             for disbursement in disbursements
         ]
@@ -1459,7 +1438,6 @@ def get_disbursements():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Update (PUT)
 @app.route('/cash-disbursement-journals/<int:id>', methods=['PUT'])
 @jwt_required()
 def update_disbursement(id):
@@ -1467,15 +1445,12 @@ def update_disbursement(id):
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Find the disbursement entry by ID and ensure it belongs to the current user
         disbursement = CashDisbursementJournal.query.filter_by(id=id, created_by=current_user_id).first()
         if not disbursement:
             return jsonify({'error': 'Disbursement entry not found or unauthorized access.'}), 404
 
-        # Parse incoming JSON data
         data = request.get_json()
 
-        # Update fields
         if 'disbursement_date' in data:
             try:
                 disbursement.disbursement_date = datetime.strptime(data['disbursement_date'], '%Y-%m-%d').date()
@@ -1483,7 +1458,7 @@ def update_disbursement(id):
                 return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
 
         if 'cheque_no' in data:
-            if CashDisbursementJournal.query.filter(CashDisbursementJournal.id != id, CashDisbursementJournal.created_by == current_user_id, CashDisbursementJournal.cheque_no == data['cheque_no']).first():
+            if CashDisbursementJournal.query.filter(and_(CashDisbursementJournal.id != id, CashDisbursementJournal.created_by == current_user_id, CashDisbursementJournal.cheque_no == data['cheque_no'])).first():
                 return jsonify({'error': f'Cheque number {data["cheque_no"]} already exists for your account.'}), 400
             disbursement.cheque_no = data['cheque_no']
 
@@ -1492,24 +1467,22 @@ def update_disbursement(id):
         disbursement.to_whom_paid = data.get('to_whom_paid', disbursement.to_whom_paid)
         disbursement.payment_type = data.get('payment_type', disbursement.payment_type)
         disbursement.description = data.get('description', disbursement.description)
+        disbursement.department = data.get('department', disbursement.department)  # Update department
         disbursement.account_credited = data.get('account_credited', disbursement.account_credited)
         disbursement.account_debited = data.get('account_debited', disbursement.account_debited)
 
-        # Update cash and bank values
         disbursement.cash = float(data.get('cash', disbursement.cash))
         disbursement.bank = float(data.get('bank', disbursement.bank))
         disbursement.total = disbursement.cash + disbursement.bank
 
         disbursement.cashbook = data.get('cashbook', disbursement.cashbook)
-        disbursement.parent_account = data.get('parent_account', disbursement.parent_account)  # Update parent_account
+        disbursement.parent_account = data.get('parent_account', disbursement.parent_account)
 
-        # Save changes
         db.session.commit()
 
         return jsonify({'message': 'Disbursement entry updated successfully', 'data': disbursement.__repr__()}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 # Delete (DELETE)
 @app.route('/cash-disbursement-journals/<int:id>', methods=['DELETE'])
 @jwt_required()
@@ -3327,24 +3300,45 @@ def get_each_adjustments(id):
 def update_estimate(id):
     """
     Update an existing estimate.
-    Only the adjusted_quantity and adjusted_price fields are updated.
+    Allows updating all fields of the estimate.
     """
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
+
+    # Retrieve the estimate or return 404 if not found
     estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
+
+    # Get JSON data from the request
     data = request.get_json()
 
-    # Validate required fields for adjustments
-    if 'adjusted_quantity' not in data and 'adjusted_price' not in data:
-        return jsonify({'error': 'At least one adjustment field is required: adjusted_quantity or adjusted_price'}), 400
+    # Validate that at least one field is provided for update
+    if not data:
+        return jsonify({'error': 'No data provided for update'}), 400
 
-    # Update adjusted fields
-    if 'adjusted_quantity' in data:
-        estimate.adjusted_quantity = data['adjusted_quantity']
+    # Update fields if they are present in the request data
+    if 'department' in data:
+        estimate.department = data['department']
+    if 'procurement_method' in data:
+        estimate.procurement_method = data['procurement_method']
+    if 'item_specifications' in data:
+        estimate.item_specifications = data['item_specifications']
+    if 'unit_of_measure' in data:
+        estimate.unit_of_measure = data['unit_of_measure']
+    if 'quantity' in data:
+        estimate.quantity = data['quantity']
+    if 'current_estimated_price' in data:
+        estimate.current_estimated_price = data['current_estimated_price']
+    if 'parent_account' in data:
+        estimate.parent_account = data['parent_account']
+    if 'sub_account' in data:
+        estimate.sub_account = data['sub_account']
     if 'adjusted_price' in data:
         estimate.adjusted_price = data['adjusted_price']
+    if 'adjusted_quantity' in data:
+        estimate.adjusted_quantity = data['adjusted_quantity']
 
-    # Recalculate adjusted_total_estimates
+    # Recalculate total_estimates and adjusted_total_estimates
+    estimate.total_estimates = float(estimate.quantity) * float(estimate.current_estimated_price)
     adjusted_quantity = estimate.adjusted_quantity or estimate.quantity
     adjusted_price = estimate.adjusted_price or estimate.current_estimated_price
     estimate.adjusted_total_estimates = float(adjusted_quantity) * float(adjusted_price)
@@ -3355,7 +3349,21 @@ def update_estimate(id):
     # Return success response
     return jsonify({
         'message': 'Estimate updated successfully!',
-        'estimate': estimate.to_dict()
+        'estimate': {
+            'id': estimate.id,
+            'department': estimate.department,
+            'procurement_method': estimate.procurement_method,
+            'item_specifications': estimate.item_specifications,
+            'unit_of_measure': estimate.unit_of_measure,
+            'quantity': estimate.quantity,
+            'current_estimated_price': estimate.current_estimated_price,
+            'total_estimates': estimate.total_estimates,
+            'parent_account': estimate.parent_account,
+            'sub_account': estimate.sub_account,
+            'adjusted_price': estimate.adjusted_price,
+            'adjusted_quantity': estimate.adjusted_quantity,
+            'adjusted_total_estimates': estimate.adjusted_total_estimates
+        }
     }), 200
 
     
@@ -3403,6 +3411,26 @@ def delete_adjustment(id, adj_id):
     db.session.commit()
 
     return jsonify({'message': 'Adjustment deleted successfully!'})
+    
+    
+@app.route('/estimates/<int:id>', methods=['DELETE'])
+@jwt_required()
+def delete_estimate(id):
+    """
+    Delete an existing estimate by ID.
+    """
+    current_user = get_jwt_identity()
+    current_user_id = current_user.get('id')
+
+    # Find the estimate by ID and ensure it belongs to the current user
+    estimate = Estimate.query.filter_by(id=id, user_id=current_user_id).first_or_404()
+
+    # Delete the estimate from the database
+    db.session.delete(estimate)
+    db.session.commit()
+
+    # Return success response
+    return jsonify({'message': 'Estimate deleted successfully!'}), 200    
 
 @app.route('/api/transactions', methods=['GET'])
 @jwt_required()
@@ -4199,7 +4227,20 @@ trial_balance = {}
 def update_trial_balance(account, debit, credit):
     # Ensure the account is a string (hashable)
     if not isinstance(account, str):
-        account = str(account)  # Convert to string if necessary
+        account = str(account)
+
+    if account not in trial_balance:
+        trial_balance[account] = {'debit': 0, 'credit': 0}
+    trial_balance[account]['debit'] += debit
+    trial_balance[account]['credit'] += credit
+
+# Initialize trial balance dictionary
+trial_balance = {}
+
+def update_trial_balance(account, debit, credit):
+    # Ensure the account is a string (hashable)
+    if not isinstance(account, str):
+        account = str(account)
 
     if account not in trial_balance:
         trial_balance[account] = {'debit': 0, 'credit': 0}
@@ -4217,109 +4258,122 @@ def get_trial_balance():
         current_user = get_jwt_identity()
         current_user_id = current_user.get('id')
 
-        # Debug: Print data from each table
-        print("Transactions:")
+        # ===== TRANSACTIONS =====
         transactions = db.session.query(
             Transaction.debited_account_name,
             func.sum(Transaction.amount_debited).label('total_debit'),
             Transaction.credited_account_name,
             func.sum(Transaction.amount_credited).label('total_credit')
         ).filter_by(user_id=current_user_id).group_by(
-            Transaction.debited_account_name, Transaction.credited_account_name
+            Transaction.debited_account_name,
+            Transaction.credited_account_name
         ).all()
-        print(transactions)
 
         for transaction in transactions:
             update_trial_balance(transaction.debited_account_name, transaction.total_debit, 0)
             update_trial_balance(transaction.credited_account_name, 0, transaction.total_credit)
 
-        print("Invoice Issued:")
+        # ===== INVOICE ISSUED =====
         invoices_issued = db.session.query(
             InvoiceIssued.account_debited,
-            InvoiceIssued.account_credited  # Fetch the credited accounts as a JSON field
+            InvoiceIssued.account_credited,
+            InvoiceIssued.amount
         ).filter_by(user_id=current_user_id).all()
-        print(invoices_issued)
 
         for invoice in invoices_issued:
-            credited_accounts = invoice.account_credited
-            if not isinstance(credited_accounts, list):
-                credited_accounts = []
-
-            total_credit = sum(account['amount'] for account in credited_accounts)
-            update_trial_balance(invoice.account_debited, total_credit, 0)
-
+            # Debit the account_debited with full invoice amount
+            update_trial_balance(invoice.account_debited, invoice.amount, 0)
+            
+            # Credit each account in account_credited
+            credited_accounts = invoice.account_credited if isinstance(invoice.account_credited, list) else []
+            
             for account in credited_accounts:
-                update_trial_balance(account['name'], 0, account['amount'])
+                if isinstance(account, dict):
+                    account_name = account.get('name')
+                    amount = float(account.get('amount', 0))
+                    if account_name and amount:
+                        update_trial_balance(account_name, 0, amount)
 
-        print("Invoice Received:")
+        # ===== INVOICE RECEIVED =====
         invoices_received = db.session.query(
             InvoiceReceived.account_debited,
-            func.sum(InvoiceReceived.amount).label('total_debit'),
-            InvoiceReceived.account_credited
-        ).filter_by(user_id=current_user_id).group_by(
-            InvoiceReceived.account_debited, InvoiceReceived.account_credited
-        ).all()
-        print(invoices_received)
+            InvoiceReceived.account_credited,
+            InvoiceReceived.amount
+        ).filter_by(user_id=current_user_id).all()
 
         for invoice in invoices_received:
-            total_debit = invoice.total_debit
-            update_trial_balance(invoice.account_debited, total_debit, 0)
-            if invoice.account_credited:
-                update_trial_balance(invoice.account_credited, 0, total_debit)
+            # Credit the account_credited with full invoice amount
+            update_trial_balance(invoice.account_credited, 0, invoice.amount)
+            
+            # Debit each account in account_debited (now handling as array)
+            debited_accounts = invoice.account_debited if isinstance(invoice.account_debited, list) else []
+            
+            for account in debited_accounts:
+                if isinstance(account, dict):
+                    account_name = account.get('name')
+                    amount = float(account.get('amount', 0))
+                    if account_name and amount:
+                        update_trial_balance(account_name, amount, 0)
 
-        print("Cash Receipts:")
+        # ===== CASH RECEIPTS =====
         cash_receipts = db.session.query(
             CashReceiptJournal.account_debited,
             func.sum(CashReceiptJournal.total).label('total_debit'),
             CashReceiptJournal.account_credited
         ).filter_by(created_by=current_user_id).group_by(
-            CashReceiptJournal.account_debited, CashReceiptJournal.account_credited
+            CashReceiptJournal.account_debited,
+            CashReceiptJournal.account_credited
         ).all()
-        print(cash_receipts)
 
         for receipt in cash_receipts:
-            update_trial_balance(receipt.account_debited, receipt.total_debit, 0)
+            update_trial_balance(receipt.account_debited, receipt.total_debit or 0, 0)
             if receipt.account_credited:
-                update_trial_balance(receipt.account_credited, 0, receipt.total_debit)
+                update_trial_balance(receipt.account_credited, 0, receipt.total_debit or 0)
 
-        print("Cash Disbursements:")
+        # ===== CASH DISBURSEMENTS =====
         cash_disbursements = db.session.query(
             CashDisbursementJournal.account_debited,
             func.sum(CashDisbursementJournal.total).label('total_debit'),
             CashDisbursementJournal.account_credited
         ).filter_by(created_by=current_user_id).group_by(
-            CashDisbursementJournal.account_debited, CashDisbursementJournal.account_credited
+            CashDisbursementJournal.account_debited,
+            CashDisbursementJournal.account_credited
         ).all()
-        print(cash_disbursements)
 
         for disbursement in cash_disbursements:
-            update_trial_balance(disbursement.account_debited, disbursement.total_debit, 0)
+            update_trial_balance(disbursement.account_debited, disbursement.total_debit or 0, 0)
             if disbursement.account_credited:
-                update_trial_balance(disbursement.account_credited, 0, disbursement.total_debit)
+                update_trial_balance(disbursement.account_credited, 0, disbursement.total_debit or 0)
 
-        # Prepare the final trial balance
+        # ===== PREPARE FINAL OUTPUT =====
         final_trial_balance = []
+        total_debits = 0
+        total_credits = 0
+
         for account, balances in trial_balance.items():
+            balance = balances['debit'] - balances['credit']
             final_trial_balance.append({
                 'account': account,
                 'debit': balances['debit'],
                 'credit': balances['credit'],
-                'balance': balances['debit'] - balances['credit']
+                'balance': balance
             })
+            total_debits += balances['debit']
+            total_credits += balances['credit']
 
         return jsonify({
             'status': 'success',
-            'trial_balance': final_trial_balance
+            'trial_balance': final_trial_balance,
+            'is_balanced': total_debits == total_credits
         }), 200
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        db.session.rollback()
+        print(f"Error generating trial balance: {str(e)}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': f"An error occurred: {str(e)}"
         }), 500
-
-
 
 @app.route('/income-statement/accounts', methods=['GET'])
 @jwt_required()
@@ -4366,9 +4420,7 @@ def get_income_accounts_debited_credited():
         return {}  # Return empty dictionary if no parent account is found
 
     # Combine all transactions into a single list
-    all_transactions = (
-        invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
-    )
+    all_transactions = invoices_issued + invoices_received + cash_receipts + cash_disbursements + transactions
 
     # Initialize account_groups with all accounts in the range 400-599
     account_groups = defaultdict(lambda: {
@@ -4401,7 +4453,14 @@ def get_income_accounts_debited_credited():
                         }
 
     # Process transactions and update amounts for accounts with transactions
+    processed_transactions = set()  # To keep track of processed transactions
+
     for transaction in all_transactions:
+        # Skip if the transaction has already been processed
+        if transaction in processed_transactions:
+            continue
+        processed_transactions.add(transaction)
+
         # Initialize variables for amount, debited_account, and credited_account
         amount = 0.0
         debited_account = None
@@ -4507,7 +4566,6 @@ def get_income_accounts_debited_credited():
                                 "note_number": note_number
                             }
                         # Add amount to the parent account
-                        account_groups[account_name]["parent_accounts"][parent_account]["amount"] += credit_amount
                         account_groups[account_name]["relevant_accounts"].add(sub_account_name)
                         account_groups[account_name]["total_amount"] += credit_amount
 
@@ -4894,7 +4952,6 @@ CASH_FLOW_CATEGORIES = {
     'Financing Activities': range(2650, 2651)    # 2650 (specific account)
 }
 
-# Function to classify cash flow based on parent account
 def get_cash_flow_category(parent_account):
     """
     Classify the cash flow category based on the numeric prefix of the parent account.
@@ -4903,7 +4960,7 @@ def get_cash_flow_category(parent_account):
     """
     # Extract numeric part of parent_account if possible (e.g., '4000-Cash & Cash Equivalent' -> '4000')
     numeric_part = re.match(r"(\d+)", str(parent_account))  # Match digits at the beginning of the string
-    
+
     if numeric_part:
         parent_account_number = int(numeric_part.group(1))  # Extract numeric part and convert to int
     else:
@@ -4927,7 +4984,8 @@ def get_cash_flow_statement():
     cash_flow = {
         'Operating Activities': [],
         'Investing Activities': [],
-        'Financing Activities': []
+        'Financing Activities': [],
+        'Cash Opening': []
     }
 
     # Query for Cash Receipt Journal (Inflows), filtered by user_id
@@ -4944,26 +5002,29 @@ def get_cash_flow_statement():
         func.sum(CashDisbursementJournal.bank).label('total_bank')
     ).filter_by(created_by=current_user_id).group_by(CashDisbursementJournal.parent_account).all()
 
+    # Query for Cash Opening (accounts between 1000 and 1099)
+    cash_opening = db.session.query(
+        func.sum(Transaction.amount_debited).label('total_cash_opening')
+    ).filter(
+        (func.substring(Transaction.credited_account_name, 1, 4).between('1000', '1099')) |
+        (func.substring(Transaction.debited_account_name, 1, 4).between('1000', '1099'))
+    ).filter_by(user_id=current_user_id).scalar()
+
+    # If cash_opening is None, set it to 0
+    cash_opening = cash_opening if cash_opening is not None else 0
+
     # Helper function to process transactions (inflows or outflows)
     def process_transactions(transactions, transaction_type):
-        """
-        Process inflows or outflows and update the cash flow statement.
-        :param transactions: List of grouped transactions from the database.
-        :param transaction_type: 'inflow' or 'outflow'.
-        """
         for transaction in transactions:
             parent_account = transaction.parent_account
             category = get_cash_flow_category(parent_account)
 
-            # Skip if the category is None (i.e., not a valid category)
             if category is None:
                 continue
 
-            # Default to zero if no value exists
             total_cash = transaction.total_cash if transaction.total_cash else 0
             total_bank = transaction.total_bank if transaction.total_bank else 0
 
-            # Find or create an entry for the parent account in the appropriate category
             found = False
             for entry in cash_flow[category]:
                 if entry['parent_account'] == parent_account:
@@ -4995,40 +5056,130 @@ def get_cash_flow_statement():
     process_transactions(inflows, 'inflow')
     process_transactions(outflows, 'outflow')
 
+    # Add the total cash opening to the cash_flow dictionary
+    cash_flow['Cash Opening'].append({
+        'total_cash_opening': cash_opening
+    })
+
     # Ensure the result is in the order defined by CASH_FLOW_CATEGORIES
     ordered_cash_flow = {
         'Operating Activities': cash_flow['Operating Activities'],
         'Investing Activities': cash_flow['Investing Activities'],
-        'Financing Activities': cash_flow['Financing Activities']
+        'Financing Activities': cash_flow['Financing Activities'],
+        'Cash Opening': cash_flow['Cash Opening']
     }
 
     # Return the cash flow statement as a JSON response
     return jsonify(ordered_cash_flow)
-
-
+    
+    
+    
+    
 @app.route('/departmental-budget', methods=['GET'])
 @jwt_required()
 def departmental_budget():
     current_user = get_jwt_identity()
     current_user_id = current_user.get('id')
-
-    # Filter estimates by the current user's ID
-    departmental_budget = db.session.query(
-        Estimate.department,
-        func.sum(Estimate.total_estimates).label('total_budget'),
-        func.sum(Estimate.adjusted_total_estimates).label('adjusted_total_budget')
-    ).filter_by(user_id=current_user_id).group_by(Estimate.department).all()
-
-    report_data = [
-        {
-            'department': row.department,
-            'total_budget': float(row.total_budget),
-            'adjusted_total_budget': float(row.adjusted_total_budget) if row.adjusted_total_budget is not None else 0.0
+    
+    try:
+        # Get optional date range filters from query parameters
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        # Base queries with user filtering
+        base_receipts = db.session.query(CashReceiptJournal).filter_by(created_by=current_user_id)
+        base_disbursements = db.session.query(CashDisbursementJournal).filter_by(created_by=current_user_id)
+        base_estimates = db.session.query(Estimate).filter_by(user_id=current_user_id)
+        
+        # Apply date filters if provided
+        if start_date:
+            base_receipts = base_receipts.filter(CashReceiptJournal.receipt_date >= start_date)
+            base_disbursements = base_disbursements.filter(CashDisbursementJournal.disbursement_date >= start_date)
+            
+        if end_date:
+            base_receipts = base_receipts.filter(CashReceiptJournal.receipt_date <= end_date)
+            base_disbursements = base_disbursements.filter(CashDisbursementJournal.disbursement_date <= end_date)
+        
+        # 1. Cash Receipts Summary
+        receipts_data = base_receipts.with_entities(
+            CashReceiptJournal.department,
+            CashReceiptJournal.account_credited,
+            func.sum(CashReceiptJournal.total).label('total')
+        ).group_by(
+            CashReceiptJournal.department,
+            CashReceiptJournal.account_credited
+        ).all()
+        
+        receipts_summary = [{
+            'department': r.department or 'Unspecified',
+            'account_credited': r.account_credited or 'Unspecified',
+            'total': float(r.total) if r.total else 0.0
+        } for r in receipts_data]
+        
+        # 2. Cash Disbursements Summary
+        disbursements_data = base_disbursements.with_entities(
+            CashDisbursementJournal.department,
+            CashDisbursementJournal.account_debited,
+            func.sum(CashDisbursementJournal.total).label('total')
+        ).group_by(
+            CashDisbursementJournal.department,
+            CashDisbursementJournal.account_debited
+        ).all()
+        
+        disbursements_summary = [{
+            'department': d.department or 'Unspecified',
+            'account_debited': d.account_debited or 'Unspecified',
+            'total': float(d.total) if d.total else 0.0
+        } for d in disbursements_data]
+        
+        # 3. Estimates Summary
+        estimates_data = base_estimates.with_entities(
+            Estimate.department,
+            Estimate.sub_account,
+            func.sum(Estimate.total_estimates).label('total')
+        ).group_by(
+            Estimate.department,
+            Estimate.sub_account
+        ).all()
+        
+        estimates_summary = [{
+            'department': e.department or 'Unspecified',
+            'sub_account': e.sub_account or 'Unspecified',
+            'total': float(e.total) if e.total else 0.0
+        } for e in estimates_data]
+        
+        # Calculate totals
+        total_receipts = sum(r['total'] for r in receipts_summary)
+        total_disbursements = sum(d['total'] for d in disbursements_summary)
+        total_estimates = sum(e['total'] for e in estimates_summary)
+        
+        response = {
+            'status': 'success',
+            'data': {
+                'receipts': receipts_summary,
+                'disbursements': disbursements_summary,
+                'estimates': estimates_summary,
+                'totals': {
+                    'receipts': total_receipts,
+                    'disbursements': total_disbursements,
+                    'estimates': total_estimates,
+                    'net_cash_flow': total_receipts - total_disbursements
+                }
+            },
+            'filters': {
+                'start_date': start_date,
+                'end_date': end_date,
+                'user_id': current_user_id
+            }
         }
-        for row in departmental_budget
-    ]
-    return jsonify(report_data)
-
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 @app.route('/consolidated-budget', methods=['GET'])
 @jwt_required()

@@ -195,6 +195,8 @@ class CashReceiptJournal(db.Model):
     ref_no = db.Column(db.String(50), nullable=True)
     from_whom_received = db.Column(db.String(255), nullable=True)
     description = db.Column(db.String(255), nullable=True)
+    department = db.Column(db.String(250), nullable=True)
+
     receipt_type = db.Column(db.String(50), nullable=False)  # Add receipt_type
     account_debited = db.Column(db.String(100), nullable=True)
     account_credited = db.Column(db.String(100), nullable=True)
@@ -237,6 +239,8 @@ class CashDisbursementJournal(db.Model):
     to_whom_paid = db.Column(db.String(100), nullable=False)
     payment_type = db.Column(db.String(255), nullable=True)
     description = db.Column(db.String(255), nullable=True)
+    department = db.Column(db.String(250), nullable=True)
+
     account_credited = db.Column(db.String(100), nullable=False)
     account_debited = db.Column(db.String(100), nullable=True)
     cashbook = db.Column(db.String(250), nullable=True)
