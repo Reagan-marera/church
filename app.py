@@ -54,8 +54,6 @@ migrate = Migrate(app, db)
 CORS(app)
 jwt = JWTManager(app)
 
-# Logging
-logging.basicConfig(level=logging.DEBUG)
 
 def role_required(role):
     def wrapper(fn):
@@ -93,21 +91,16 @@ def request_reset_password():
     email = data.get('email')
 
     if not email:
-        logging.warning("Email not provided in request")
         return jsonify({"error": "Email is required"}), 400
-
-    logging.debug(f"Received password reset request for email: {email}")
 
     user = User.query.filter(User.email.ilike(email)).first()
     if not user:
-        logging.warning(f"No user found with email: {email}")
         return jsonify({"error": "User with this email does not exist"}), 404
 
     otp = generate_otp()
     store_otp(email, otp)
 
     username = user.username
-    logging.debug(f"Generated OTP: {otp} for user: {username}")
 
     msg = Message('Password Reset Request', sender='noreply@yourapp.com', recipients=[email])
     msg.body = f"""
@@ -126,10 +119,8 @@ def request_reset_password():
 
     try:
         mail.send(msg)
-        logging.info(f"OTP email sent to {email}")
         return jsonify({"message": "OTP sent to your email"}), 200
     except Exception as e:
-        logging.error(f"Failed to send OTP email to {email}: {e}", exc_info=True)
         return jsonify({"error": f"Failed to send OTP email: {e}"}), 500
 
 
@@ -142,7 +133,6 @@ def generate_otp():
 def store_otp(email, otp):
     """Store the OTP in the database or any other storage for verification."""
     # This function should implement the logic to save the OTP
-    logging.debug(f"Storing OTP: {otp} for email: {email}")
 
 @app.route('/get_user_role_by_email', methods=['POST'])
 def get_user_role_by_email():
@@ -282,7 +272,6 @@ def store_otp(email, otp):
  
 from flask import request, jsonify
 from werkzeug.security import generate_password_hash
-import logging
 
 # Assuming you have a secret code for CEO registration
 CEO_SECRET_CODE = "moses2ceo@YOUMING"
@@ -323,11 +312,9 @@ def register_user():
         db.session.add(user)
         db.session.commit()
 
-        logging.info(f"User {data['username']} registered successfully.")
         return jsonify({'message': 'User registered successfully'}), 201
 
     except Exception as e:
-        logging.error(f"Error registering user: {str(e)}", exc_info=True)
         return jsonify({'error': 'Internal Server Error'}), 500
 
 
@@ -566,7 +553,6 @@ def get_all_transactions():
         return jsonify(transactions_data), 200
 
     except Exception as e:
-        print(f"Error: {str(e)}")
         return jsonify({'status': 'error', 'message': 'An unexpected error occurred.'}), 500
     
 @app.route('/chart-of-accounts', methods=['GET', 'POST'])
@@ -908,7 +894,6 @@ def manage_invoices():
 
         elif request.method == 'POST':
             data = request.get_json()
-            app.logger.info(f"Received data: {data}")
 
             if not data.get('invoice_number'):
                 return jsonify({'error': 'Invoice number is required'}), 400
@@ -952,7 +937,6 @@ def manage_invoices():
             return jsonify({'message': 'Invoice created successfully'}), 201
 
     except Exception as e:
-        app.logger.error(f"Error managing invoices: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
 
 @app.route('/invoices/<int:id>', methods=['PUT', 'DELETE'])
@@ -997,7 +981,6 @@ def update_delete_invoice(id):
             return jsonify({'message': 'Invoice deleted successfully'}), 200
 
     except Exception as e:
-        app.logger.error(f"Error processing invoice {id}: {e}")
         return jsonify({'error': 'An error occurred while processing your request'}), 500
 
 
@@ -1673,12 +1656,8 @@ def sendstk(amount, phone):
     if response.status_code == 200:
         data = response.json()
         if data.get('Status'):
-            print("Payment Successful")
         else:
-            print("Payment Failed")
-        print(data)
     else:
-        print("Request failed with status code:", response.status_code)
         
 # Mock function for db.session.query
 def get_opening_balance(account_id):
@@ -1691,9 +1670,6 @@ def get_opening_balance(account_id):
 
     opening_balance_receipts = opening_balance_query if opening_balance_query else 0.0
 
-    # Log the data received from the CashReceiptJournal query
-    logging.debug(f"Opening Balance Receipts for account {account_id}: {opening_balance_receipts}")
-
     opening_balance_query = db.session.query(func.sum(CashDisbursementJournal.total).label('total_disbursements')) \
         .filter(CashDisbursementJournal.account_debited == account_id) \
         .filter(func.extract('month', CashDisbursementJournal.disbursement_date) < datetime.now().month) \
@@ -1702,14 +1678,8 @@ def get_opening_balance(account_id):
 
     opening_balance_disbursements = opening_balance_query if opening_balance_query else 0.0
 
-    # Log the data received from the CashDisbursementJournal query
-    logging.debug(f"Opening Balance Disbursements for account {account_id}: {opening_balance_disbursements}")
-
     # Subtract disbursements from receipts for opening balance
     opening_balance = opening_balance_receipts - opening_balance_disbursements
-
-    # Log the calculated opening balance
-    logging.debug(f"Calculated Opening Balance for account {account_id}: {opening_balance}")
 
     return opening_balance
 
@@ -1726,21 +1696,15 @@ def financial_report():
         ChartOfAccounts.parent_account != 0
     ).all()
 
-    logging.debug(f"Parent accounts fetched: {parent_accounts}")
-
     if not parent_accounts:
-        logging.warning("No parent accounts found in the database!")
 
     report = []
 
     for parent_account in parent_accounts:
-        logging.debug(f"Looking for sub-accounts for parent account ID: {parent_account.id}")
         
         # Check if sub_account_details is populated
         if parent_account.sub_account_details:
-            logging.debug(f"Sub-account details for parent account '{parent_account.parent_account}': {parent_account.sub_account_details}")
         else:
-            logging.debug(f"No sub-account details found for parent account '{parent_account.parent_account}'")
 
         account_data = {
             'parent_account': parent_account.parent_account,
@@ -1755,7 +1719,6 @@ def financial_report():
 
         # If sub_account_details is not empty, iterate over them (assuming it's a list)
         for sub_account in account_data['sub_account_details']:
-            logging.debug(f"Processing sub-account: {sub_account}")
 
             # Ensure sub_account has 'transactions' key initialized
             if 'transactions' not in sub_account:
@@ -1764,11 +1727,9 @@ def financial_report():
                     'disbursements': 0.0
                 }
 
-            logging.debug(f"Sub-account structure: {sub_account}")  # Log the entire structure of sub_account
             
             # Check if 'id' exists in the sub_account dictionary
             if 'id' not in sub_account:
-                logging.error(f"Sub-account does not have an 'id': {sub_account}")
                 continue  # Skip this sub-account if it doesn't have 'id'
             
             # Now safely access the 'id' of the sub_account
@@ -1786,9 +1747,6 @@ def financial_report():
                 func.extract('year', CashReceiptJournal.receipt_date) == current_year
             ).all()
 
-            # Log the receipts data
-            logging.debug(f"Receipts for subaccount {sub_account['name']}: {receipts}")  # Change sub_account_name to 'name'
-
             # Fetch disbursements for the current sub-account
             disbursements = CashDisbursementJournal.query.filter(
                 CashDisbursementJournal.account_debited == sub_account['id'],  # Use sub_account['id']
@@ -1796,16 +1754,9 @@ def financial_report():
                 func.extract('year', CashDisbursementJournal.disbursement_date) == current_year
             ).all()
 
-            # Log the disbursements data
-            logging.debug(f"Disbursements for subaccount {sub_account['name']}: {disbursements}")  # Change sub_account_name to 'name'
-
             # Calculate total receipts and disbursements for the sub-account
             sub_account_data['transactions']['receipts'] = sum(receipt.total for receipt in receipts) if receipts else 0.0
             sub_account_data['transactions']['disbursements'] = sum(disbursement.total for disbursement in disbursements) if disbursements else 0.0
-
-            # Log the aggregated receipt and disbursement values for the sub-account
-            logging.debug(f"Aggregated Receipts for subaccount {sub_account['name']}: {sub_account_data['transactions']['receipts']}")
-            logging.debug(f"Aggregated Disbursements for subaccount {sub_account['name']}: {sub_account_data['transactions']['disbursements']}")
 
             # Calculate closing balance for the sub-account
             sub_account_data['closing_balance'] = sub_account_data['opening_balance'] + \
@@ -1825,7 +1776,6 @@ def financial_report():
                                           account_data['transactions']['receipts'] - \
                                           account_data['transactions']['disbursements']
 
-        logging.debug(f"Parent account data: {account_data}")
 
         # Add the parent account data to the report
         report.append(account_data)
@@ -1846,24 +1796,20 @@ def match_sub_account_name(sub_account_name_normalized, sub_accounts):
         # Handle the case where sub_accounts is a dictionary, where keys are sub-account names
         for account_key in sub_accounts.keys():
             account_name = normalize_sub_account_name(account_key)  # Normalize sub-account name
-            print(f"Checking sub_account_name (dict): {account_name} against {sub_account_name_normalized}")
             if account_name == sub_account_name_normalized:
                 return True
     elif isinstance(sub_accounts, list):
         # Handle the case where sub_accounts is a list of names
         for account in sub_accounts:
             account_name = normalize_sub_account_name(account)  # Normalize sub-account name
-            print(f"Checking sub_account_name (list): {account_name} against {sub_account_name_normalized}")
             if account_name == sub_account_name_normalized:
                 return True
     elif isinstance(sub_accounts, str):
         # Handle the case where sub_accounts is a string (likely JSON format)
         try:
             sub_accounts_json = json.loads(sub_accounts)
-            print(f"Checking sub_account_name (json): {sub_accounts_json}")
             return match_sub_account_name(sub_account_name_normalized, sub_accounts_json)
         except json.JSONDecodeError:
-            print(f"Failed to decode JSON string in sub_accounts: {sub_accounts}")
     return False
 
 def filter_invoice_by_sub_account(invoices, sub_account_name_normalized):
@@ -1873,25 +1819,20 @@ def filter_invoice_by_sub_account(invoices, sub_account_name_normalized):
     for invoice in invoices:
         try:
             sub_accounts = invoice.sub_accounts
-            print(f"Raw sub_accounts for invoice {invoice.id}: {sub_accounts}")
 
             # Check if sub_accounts is empty or None
             if not sub_accounts:
-                print(f"Skipping invoice {invoice.id} as sub_accounts is empty or None")
                 continue
 
             if isinstance(sub_accounts, str):
                 # Handle string format (JSON string)
                 sub_accounts = json.loads(sub_accounts) if sub_accounts else {}
-                print(f"Decoded sub_accounts (JSON): {sub_accounts}")
 
             # For invoices, we expect a different structure (nested dict)
             if match_sub_account_name(sub_account_name_normalized, sub_accounts):
                 filtered_invoices.append(invoice)
         except json.JSONDecodeError as e:
-            print(f"Failed to decode sub_accounts for invoice {invoice.id}: {str(e)}")
         except Exception as e:
-            print(f"Error processing sub_accounts for invoice {invoice.id}: {str(e)}")
 
     return filtered_invoices
 
@@ -1904,25 +1845,20 @@ def filter_entries_by_sub_account(entries, sub_account_name_normalized):
     for entry in entries:
         try:
             sub_accounts = entry.sub_accounts
-            print(f"Raw sub_accounts for entry {entry.id}: {sub_accounts}")
             
             # Check if sub_accounts is empty or None
             if not sub_accounts:
-                print(f"Skipping entry {entry.id} as sub_accounts is empty or None")
                 continue
             
             if isinstance(sub_accounts, str):
                 # Handle string format (JSON string)
                 sub_accounts = json.loads(sub_accounts) if sub_accounts else {}
-                print(f"Decoded sub_accounts (JSON): {sub_accounts}")
 
             # Filter based on sub_account_name
             if match_sub_account_name(sub_account_name_normalized, sub_accounts):
                 filtered_entries.append(entry)
         except json.JSONDecodeError as e:
-            print(f"Failed to decode sub_accounts for entry {entry.id}: {str(e)}")
         except Exception as e:
-            print(f"Error processing sub_accounts for entry {entry.id}: {str(e)}")
 
     return filtered_entries
 
@@ -1974,24 +1910,13 @@ def cash_and_cash_equivalents_report():
                     InvoiceIssued.parent_account == parent_account.parent_account
                 ).all()
 
-                # Debug: Check the query results
-                print(f"Found {len(receipts)} receipts: {receipts}")
-                print(f"Found {len(disbursements)} disbursements: {disbursements}")
-                print(f"Found {len(invoices)} invoices: {invoices}")
-
                 # Normalize the sub_account_name for comparison
                 sub_account_name_normalized = normalize_sub_account_name(sub_account_name)
-                print(f"Checking sub_account_name_normalized: {sub_account_name_normalized}")
 
                 # Filter receipts, disbursements, and invoices using the helper function
                 filtered_receipts = filter_entries_by_sub_account(receipts, sub_account_name_normalized)
                 filtered_disbursements = filter_entries_by_sub_account(disbursements, sub_account_name_normalized)
                 filtered_invoices = filter_invoice_by_sub_account(invoices, sub_account_name_normalized)
-
-                # Debugging: print filtered receipts and disbursements
-                print(f"Filtered Receipts: {filtered_receipts}")
-                print(f"Filtered Disbursements: {filtered_disbursements}")
-                print(f"Filtered Invoices: {filtered_invoices}")
 
                 # Calculate the total receipts, disbursements, and invoices
                 total_receipts = sum(receipt.total for receipt in filtered_receipts) or 0.0  # Ensure it's a float
@@ -2035,7 +1960,6 @@ def cash_and_cash_equivalents_report():
 
     except Exception as e:
         # Handle any errors and provide feedback
-        print(f"Error generating report: {str(e)}")
         return jsonify({"error": f"Failed to generate report: {str(e)}"}), 500
 
 
@@ -2291,14 +2215,11 @@ def parse_sub_accounts(sub_accounts):
     if isinstance(sub_accounts, str):
         try:
             parsed = json.loads(sub_accounts)  # Try to parse the string as JSON
-            print(f"Parsed sub_accounts: {parsed}")  # Debug print
             return parsed
         except json.JSONDecodeError:
-            print(f"Error parsing sub_accounts: {sub_accounts}")
             return []  # Return empty list if parsing fails
     elif isinstance(sub_accounts, list):
         return sub_accounts
-    print(f"sub_accounts is already a list or not a string: {sub_accounts}")
     return []
 
 def initialize_parent_account(report_data, parent_account, account_type):
@@ -2311,7 +2232,6 @@ def initialize_parent_account(report_data, parent_account, account_type):
             'sub_account_details': {},  # To hold sub-account balances
             'account_type': account_type
         }
-        print(f"Initialized parent account: {parent_account} with account type: {account_type}")
 
 def generate_general_report_with_sub_accounts():
     # Initialize the report data dictionary to store account balances
@@ -2450,7 +2370,6 @@ def general_report():
     return jsonify(report_data)
 
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -2460,12 +2379,6 @@ def get_debited_credited_accounts():
     try:
         # Fetch all chart of accounts
         chart_of_accounts = ChartOfAccounts.query.all()
-
-        # Debugging the fetched chart of accounts
-        if not chart_of_accounts:
-            logger.warning("No chart of accounts found in the database.")
-        else:
-            logger.debug("Fetched chart of accounts: %s", chart_of_accounts)
 
         # Create a list to hold the account data
         account_data = []
@@ -2567,31 +2480,24 @@ def get_debited_credited_accounts():
         if account_data:
             return jsonify({"data": account_data, "status": "success"}), 200
         else:
-            logger.info("No transactions found to display.")
             return jsonify({"data": [], "status": "success"}), 200
 
     except Exception as e:
-        logger.error("Error processing accounts and transactions: %s", e)
         return jsonify({"data": [], "status": "error", "message": str(e)}), 500
 
 def get_opening_balance_for_debited_account(account_debited):
     try:
-        logger.debug(f"Fetching opening balance for: {account_debited}")
 
         # Iterate through all accounts and check their sub_account_details
         for account in ChartOfAccounts.query.all():
             if account.sub_account_details:
                 for sub_account in account.sub_account_details:
-                    logger.debug(f"Checking sub-account: {sub_account.get('name')}")
                     if sub_account.get('name') == account_debited:
                         opening_balance = float(sub_account.get('opening_balance', 0.0))
-                        logger.debug(f"Found opening balance: {opening_balance}")
                         return opening_balance
 
-        logger.warning(f"No opening balance found for: {account_debited}")
         return 0.0
     except Exception as e:
-        logger.error(f"Error fetching opening balance for {account_debited}: {e}")
         return 0.0
 
     
@@ -2601,19 +2507,6 @@ def get_opening_balance_for_debited_account(account_debited):
 @app.route('/get_trial_balance', methods=['GET'])
 def get_trial_balancefffffff():
     try:
-        # Initialize a list to store log entries
-        log_entries = []
-
-        # Fetch all chart of accounts
-        chart_of_accounts = ChartOfAccounts.query.all()
-
-        if not chart_of_accounts:
-            log_entries.append("WARNING: No chart of accounts found in the database.")
-        else:
-            log_entries.append("DEBUG: Fetched chart of accounts:")
-            for account in chart_of_accounts:
-                log_entries.append(f"DEBUG: Account ID: {account.id}, Account Name: {account.account_name}, Parent Account: {account.parent_account}, Account Type: {account.account_type}")
-
         # Group accounts by parent account and add subaccounts to each parent account
         grouped_accounts = {}
         
@@ -2690,16 +2583,13 @@ def get_trial_balancefffffff():
         return jsonify({
             "data": trial_balance_data,
             "status": "success",
-            "logs": log_entries  # Adding logs to the response
         }), 200
 
     except Exception as e:
-        logger.error("Error processing trial balance: %s", e)
         return jsonify({
             "data": [],
             "status": "error",
             "message": str(e),
-            "logs": []  # In case of an error, send empty logs
         }), 500
 
 
@@ -2740,14 +2630,11 @@ def get_parent_account_name(parent_account_id_or_name):
             parent_account = None
 
         if parent_account:
-            logger.debug(f"DEBUG: Found parent account: {parent_account.account_name}, Parent Account ID: {parent_account.id}")
             return parent_account.account_name  # Return the account's name
         else:
             # If parent account not found, log it and return 'Unknown'
-            logger.warning(f"WARNING: Parent account '{parent_account_id_or_name}' not found in the Chart of Accounts.")
             return "Unknown"
     else:
-        logger.warning("WARNING: Parent account ID or name is missing.")
         return "Unknown"
 
 
@@ -2757,19 +2644,6 @@ def get_parent_account_name(parent_account_id_or_name):
 @app.route('/get_income_statement', methods=['GET'])
 def get_income_statement():
     try:
-        # Initialize a list to store log entries
-        log_entries = []
-
-        # Fetch all chart of accounts
-        chart_of_accounts = ChartOfAccounts.query.all()
-
-        if not chart_of_accounts:
-            log_entries.append("WARNING: No chart of accounts found in the database.")
-        else:
-            log_entries.append("DEBUG: Fetched chart of accounts:")
-            for account in chart_of_accounts:
-                log_entries.append(f"DEBUG: Account ID: {account.id}, Account Name: {account.account_name}, Parent Account: {account.parent_account}, Account Type: {account.account_type}")
-
         # Group accounts by parent account and add subaccounts to each parent account
         grouped_accounts = {}
         
@@ -2867,16 +2741,13 @@ def get_income_statement():
                 "details": income_statement_data
             },
             "status": "success",
-            "logs": log_entries  # Adding logs to the response
         }), 200
 
     except Exception as e:
-        logger.error("Error processing income statement: %s", e)
         return jsonify({
             "data": [],
             "status": "error",
             "message": str(e),
-            "logs": []  # In case of an error, send empty logs
         }), 500
 def safe_float_conversion(value):
     """Helper function to safely convert a value to a float or return 0.0 if invalid or empty"""
@@ -2921,11 +2792,6 @@ def get_subaccount_details():
                 'owner_type': account.__class__.__name__
             })
 
-    # Log the fetched subaccount details
-    print(f"Fetched subaccounts from database:")
-    for sub in subaccounts:
-        print(f"Subaccount: {sub}")
-
     return jsonify({'subaccounts': subaccounts})
 
 @app.route('/update_subaccount_details', methods=['PUT'])
@@ -2948,18 +2814,15 @@ def update_subaccount_details():
 
     # Get the list of subaccounts to update (from the request body)
     data = request.get_json()  # This is expected to be a list of subaccounts
-    print(f"Incoming Data: {data}")  # Debugging: Log the incoming data
 
     # Loop through all subaccounts to update
     for subaccount_data in data:  # Now we're iterating directly over the list
         # Print the fields to verify the structure
-        print(f"Subaccount Data: {subaccount_data}")
 
         debit_name = subaccount_data.get('debit_name')
         credit_name = subaccount_data.get('credit_name')
 
         if not debit_name or not credit_name:
-            print("No debit or credit name found in the data.")
             continue  # Skip if debit or credit name is not found
 
         debit_subaccount = None
@@ -2982,7 +2845,6 @@ def update_subaccount_details():
                 break
 
         if not debit_subaccount or not credit_subaccount:
-            print(f"Subaccount {debit_name} or {credit_name} not found")
             continue  # Skip if subaccount not found
 
         # Update debit subaccount details with the new data
@@ -3106,16 +2968,13 @@ def submit_transaction():
         return jsonify({"message": "Transaction submitted successfully"}), 201
 
     except ValueError as ve:
-        logging.error(f"Value error: {str(ve)}")
         return jsonify({"error": "Invalid data format."}), 400
 
     except IntegrityError as ie:
-        logging.error(f"Database integrity error: {str(ie)}")
         db.session.rollback()
         return jsonify({"error": "Database integrity error."}), 400
 
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
         db.session.rollback()
         return jsonify({"error": "An unexpected error occurred."}), 500
 
@@ -3156,7 +3015,6 @@ def get_transactions():
         return jsonify({"transactions": transaction_data}), 200
 
     except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
         return jsonify({"error": "An unexpected error occurred."}), 500
 
 @app.route('/update-transaction/<int:id>', methods=['PUT'])
@@ -3191,7 +3049,6 @@ def update_transaction(id):
 
         return jsonify({"message": "Transaction updated successfully!"}), 200
     except Exception as e:
-        app.logger.error(f"Error updating transaction: {e}")
         return jsonify({"message": "Failed to update transaction"}), 500
 
 
@@ -3576,7 +3433,6 @@ def get_all_expense():
                     if 'name' in item and '-' in item['name']:
                         return int(item['name'].split('-')[0].strip())
         except (ValueError, TypeError):
-            print(f"Failed to extract account code from: {account_field}")
         return None
 
     def get_parent_account(account_code):
@@ -3675,10 +3531,8 @@ def get_all_expense():
         return jsonify(response)
 
     except SQLAlchemyError as db_error:
-        print(f"Database error: {db_error}")
         return jsonify({'error': 'Database error occurred while fetching expense transactions.'}), 500
     except Exception as e:
-        print(f"Unexpected error: {e}")
         return jsonify({'error': 'An unexpected error occurred while processing the request.'}), 500
 
 @app.route('/liabilitytransactions', methods=['GET'])
@@ -3708,7 +3562,6 @@ def get_all_liabilities():
                     if 'name' in item and '-' in item['name']:
                         return int(item['name'].split('-')[0].strip())
         except (ValueError, TypeError):
-            print(f"Failed to extract account code from: {account_field}")
         return None
 
     def get_parent_account(account_code):
@@ -3803,10 +3656,8 @@ def get_all_liabilities():
         return jsonify(response)
 
     except SQLAlchemyError as db_error:
-        print(f"Database error: {db_error}")
         return jsonify({'error': 'Database error occurred while fetching liability transactions.'}), 500
     except Exception as e:
-        print(f"Unexpected error: {e}")
         return jsonify({'error': 'An unexpected error occurred while processing the request.'}), 500
 
 
@@ -3832,21 +3683,16 @@ def get_net_assets():
                         try:
                             return int(account_name.split('-')[0].strip())
                         except ValueError:
-                            print(f"Failed to extract account code from: {account_name}")
                             continue
-            print(f"Invalid account field format: {account_field}")
             return None
         elif isinstance(account_field, str):
             if account_field and '-' in account_field:
                 try:
                     return int(account_field.split('-')[0].strip())
                 except ValueError:
-                    print(f"Failed to extract account code from: {account_field}")
                     return None
-            print(f"Invalid account field format: {account_field}")
             return None
         else:
-            print(f"Invalid account field format: {account_field}")
             return None
 
     def get_parent_account(account_code, accounts):
@@ -3907,7 +3753,6 @@ def get_net_assets():
         }
         return jsonify(response), 200
     except Exception as e:
-        print(f"Error fetching net assets: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -3936,15 +3781,12 @@ def get_all_assets():
                         try:
                             return int(account_name.split('-')[0].strip())
                         except ValueError:
-                            print(f"Failed to extract account code from: {account_name}")
                             continue
-            print(f"Invalid account field format: {account_field}")
             return None
         elif isinstance(account_field, str) and '-' in account_field:
             try:
                 return int(account_field.split('-')[0].strip())
             except ValueError:
-                print(f"Failed to extract account code from: {account_field}")
                 return None
         return None
 
@@ -4110,21 +3952,16 @@ def get_all_revenue():
                         try:
                             return int(account_name.split('-')[0].strip())
                         except ValueError:
-                            print(f"Failed to extract account code from: {account_name}")
                             continue
-            print(f"Invalid account field format: {account_field}")
             return None
         elif isinstance(account_field, str):
             if account_field and '-' in account_field:
                 try:
                     return int(account_field.split('-')[0].strip())
                 except ValueError:
-                    print(f"Failed to extract account code from: {account_field}")
                     return None
-            print(f"Invalid account field format: {account_field}")
             return None
         else:
-            print(f"Unsupported account field type: {type(account_field)}")
             return None
 
     def get_parent_account(account_code):
@@ -4369,7 +4206,6 @@ def get_trial_balance():
 
     except Exception as e:
         db.session.rollback()
-        print(f"Error generating trial balance: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': f"An error occurred: {str(e)}"
@@ -4387,13 +4223,6 @@ def get_income_accounts_debited_credited():
     cash_receipts = db.session.query(CashReceiptJournal).filter_by(created_by=current_user_id).all()
     cash_disbursements = db.session.query(CashDisbursementJournal).filter_by(created_by=current_user_id).all()
     transactions = db.session.query(Transaction).filter_by(user_id=current_user_id).all()
-
-    # Debugging: Check the number of transactions fetched
-    print(f"Invoices Issued: {len(invoices_issued)}")
-    print(f"Invoices Received: {len(invoices_received)}")
-    print(f"Cash Receipts: {len(cash_receipts)}")
-    print(f"Cash Disbursements: {len(cash_disbursements)}")
-    print(f"Transactions: {len(transactions)}")
 
     # Retrieve all accounts once to optimize performance
     all_accounts = ChartOfAccounts.query.all()
@@ -4497,12 +4326,6 @@ def get_income_accounts_debited_credited():
         parent_debited = get_parent_account_details(debited_account)
         parent_credited = get_parent_account_details(credited_account)
 
-        # Debugging: Check the transaction details
-        print(f"Transaction: {transaction}")
-        print(f"Amount: {amount}")
-        print(f"Debited Account: {debited_account}, Parent: {parent_debited}")
-        print(f"Credited Account: {credited_account}, Parent: {parent_credited}")
-
         # Function to check if the account name is within the range 400-599
         def is_account_in_range(account_name):
             """Check if the account name starts with a number between 400 and 599."""
@@ -4587,7 +4410,6 @@ def get_income_accounts_debited_credited():
     }
 
     # Debugging: Check the final account groups
-    print(f"Account Groups: {account_groups}")
     return jsonify(account_groups)
 
 
@@ -4607,13 +4429,6 @@ def get_balance_accounts_debited_credited():
         cash_receipts = db.session.query(CashReceiptJournal).filter_by(created_by=current_user_id).all()
         cash_disbursements = db.session.query(CashDisbursementJournal).filter_by(created_by=current_user_id).all()
         transactions = db.session.query(Transaction).filter_by(user_id=current_user_id).all()
-
-        # Debugging: Check the number of transactions fetched
-        logging.debug(f"Invoices Issued: {len(invoices_issued)}")
-        logging.debug(f"Invoices Received: {len(invoices_received)}")
-        logging.debug(f"Cash Receipts: {len(cash_receipts)}")
-        logging.debug(f"Cash Disbursements: {len(cash_disbursements)}")
-        logging.debug(f"Transactions: {len(transactions)}")
 
         # Retrieve all accounts once to optimize performance
         all_accounts = ChartOfAccounts.query.filter_by(user_id=current_user_id).all()
@@ -4656,9 +4471,6 @@ def get_balance_accounts_debited_credited():
                             "account_name": account_name           # Sub-account name
                         }
 
-        # Log all account names in account_groups
-        logging.debug(f"Account Groups Keys: {list(account_groups.keys())}")
-
         # Function to update trial balance
         def update_trial_balance(account_name, debit_amount, credit_amount):
             """Update the trial balance for a given account."""
@@ -4674,9 +4486,7 @@ def get_balance_accounts_debited_credited():
                 if account_name in account_groups:
                     account_groups[account_name]["total_amount"] += (debit_amount - credit_amount)
                 else:
-                    logging.error(f"Account name not found: {account_name}")
             else:
-                logging.error(f"Invalid account name type: {account_name} (type: {type(account_name)})")
 
         # Process transactions and update amounts for accounts with transactions
         for transaction in transactions:
@@ -4736,18 +4546,13 @@ def get_balance_accounts_debited_credited():
         }
 
         # Debugging: Check the final account groups
-        logging.debug(f"Account Groups: {account_groups}")
         return jsonify(account_groups)
     except Exception as e:
-        logging.error(f"An error occurred: {e}")
         return jsonify({"error": "An unexpected error occurred"}), 500
 
 
 import logging
 from collections import defaultdict
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @app.route('/transactions/accounts', methods=['GET'])
 @jwt_required()
@@ -4792,10 +4597,6 @@ def get_accounts():
     for transaction in all_transactions:
         amount, debited_account, credited_accounts = extract_transaction_details(transaction)
 
-        # Log raw credited_accounts for debugging
-        logging.info(f"Processing transaction ID {getattr(transaction, 'id', 'N/A')}: "
-                     f"credited_accounts = {credited_accounts}")
-
         # Mirror amounts to ensure balance
         total_debited_amount, total_credited_amount = mirror_amounts(amount, debited_account, credited_accounts)
 
@@ -4809,8 +4610,6 @@ def get_accounts():
                 if isinstance(credited_account, dict) and 'name' in credited_account and 'amount' in credited_account:
                     update_account_balances(credited_account['name'], 0, credited_account['amount'], account_balances)
                 else:
-                    logging.warning(f"Invalid credited_account structure: {credited_account} "
-                                    f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
 
     # Prepare the final account balances
     final_account_balances = []
@@ -4893,19 +4692,13 @@ def extract_transaction_details(transaction):
             elif isinstance(account, str):  # If it's a string, convert it to a dictionary
                 normalized_credited_accounts.append({"name": account, "amount": amount})
             else:
-                logging.warning(f"Unexpected credited_account format: {account} "
-                                f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
     elif isinstance(credited_accounts, dict):  # Single dictionary case
         if 'name' in credited_accounts and 'amount' in credited_accounts:
             normalized_credited_accounts.append(credited_accounts)
         else:
-            logging.warning(f"Unexpected credited_account format: {credited_accounts} "
-                            f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
     elif isinstance(credited_accounts, str):  # Single string case
         normalized_credited_accounts.append({"name": credited_accounts, "amount": amount})
     else:
-        logging.warning(f"Unexpected credited_account format: {credited_accounts} "
-                        f"in transaction ID {getattr(transaction, 'id', 'N/A')}")
 
     return amount, debited_account, normalized_credited_accounts
 def mirror_amounts(amount, debited_account, credited_accounts):
@@ -5494,7 +5287,6 @@ def get_cashbook_reconciliations():
         } for r in reconciliations])
 
     except Exception as e:
-        print(f"Error fetching cashbook reconciliations: {str(e)}")
         return jsonify({"error": "Failed to fetch reconciliations"}), 500
 
 @app.route('/api/cashbook-reconciliations/<int:reconciliation_id>', methods=['GET'])
@@ -5524,7 +5316,6 @@ def get_cashbook_reconciliation(reconciliation_id):
         })
 
     except Exception as e:
-        print(f"Error fetching reconciliation: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
 @app.route('/api/cashbook-reconciliations', methods=['POST'])
 @jwt_required()
@@ -5551,7 +5342,6 @@ def create_cashbook_reconciliation():
         return jsonify({'message': 'Reconciliation added successfully', 'id': new_entry.id}), 201
 
     except Exception as e:
-        print(f"Error creating reconciliation: {str(e)}")
         return jsonify({'error': 'Failed to create reconciliation'}), 500
 
 @app.route('/api/cashbook-reconciliations/<int:reconciliation_id>', methods=['DELETE'])
@@ -5563,7 +5353,6 @@ def delete_cashbook_reconciliation(reconciliation_id):
         db.session.commit()
         return jsonify({'message': 'Reconciliation deleted successfully'}), 200
     except Exception as e:
-        print(f"Error deleting reconciliation: {str(e)}")
         return jsonify({'error': 'Failed to delete reconciliation'}), 500
 
 
