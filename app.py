@@ -10,7 +10,6 @@ import random
 import string
 import os
 import re
-import logging
 import requests
 import json
 from collections import defaultdict
@@ -1656,8 +1655,11 @@ def sendstk(amount, phone):
     if response.status_code == 200:
         data = response.json()
         if data.get('Status'):
+            pass
         else:
+            pass
     else:
+        pass
         
 # Mock function for db.session.query
 def get_opening_balance(account_id):
@@ -1697,6 +1699,7 @@ def financial_report():
     ).all()
 
     if not parent_accounts:
+        pass
 
     report = []
 
@@ -1704,7 +1707,9 @@ def financial_report():
         
         # Check if sub_account_details is populated
         if parent_account.sub_account_details:
+            pass
         else:
+            pass
 
         account_data = {
             'parent_account': parent_account.parent_account,
@@ -1776,7 +1781,6 @@ def financial_report():
                                           account_data['transactions']['receipts'] - \
                                           account_data['transactions']['disbursements']
 
-
         # Add the parent account data to the report
         report.append(account_data)
 
@@ -1810,6 +1814,7 @@ def match_sub_account_name(sub_account_name_normalized, sub_accounts):
             sub_accounts_json = json.loads(sub_accounts)
             return match_sub_account_name(sub_account_name_normalized, sub_accounts_json)
         except json.JSONDecodeError:
+            pass
     return False
 
 def filter_invoice_by_sub_account(invoices, sub_account_name_normalized):
@@ -1832,7 +1837,9 @@ def filter_invoice_by_sub_account(invoices, sub_account_name_normalized):
             if match_sub_account_name(sub_account_name_normalized, sub_accounts):
                 filtered_invoices.append(invoice)
         except json.JSONDecodeError as e:
+            pass
         except Exception as e:
+            pass
 
     return filtered_invoices
 
@@ -1858,7 +1865,9 @@ def filter_entries_by_sub_account(entries, sub_account_name_normalized):
             if match_sub_account_name(sub_account_name_normalized, sub_accounts):
                 filtered_entries.append(entry)
         except json.JSONDecodeError as e:
+            pass
         except Exception as e:
+            pass
 
     return filtered_entries
 
@@ -2370,7 +2379,6 @@ def general_report():
     return jsonify(report_data)
 
 
-logger = logging.getLogger(__name__)
 
 
 
@@ -2507,6 +2515,9 @@ def get_opening_balance_for_debited_account(account_debited):
 @app.route('/get_trial_balance', methods=['GET'])
 def get_trial_balancefffffff():
     try:
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
         # Group accounts by parent account and add subaccounts to each parent account
         grouped_accounts = {}
         
@@ -2582,14 +2593,14 @@ def get_trial_balancefffffff():
         # Return the trial balance along with log entries
         return jsonify({
             "data": trial_balance_data,
-            "status": "success",
+            "status": "success"
         }), 200
 
     except Exception as e:
         return jsonify({
             "data": [],
             "status": "error",
-            "message": str(e),
+            "message": str(e)
         }), 500
 
 
@@ -2644,6 +2655,9 @@ def get_parent_account_name(parent_account_id_or_name):
 @app.route('/get_income_statement', methods=['GET'])
 def get_income_statement():
     try:
+        # Fetch all chart of accounts
+        chart_of_accounts = ChartOfAccounts.query.all()
+
         # Group accounts by parent account and add subaccounts to each parent account
         grouped_accounts = {}
         
@@ -2740,14 +2754,14 @@ def get_income_statement():
                 "net_income": net_income,
                 "details": income_statement_data
             },
-            "status": "success",
+            "status": "success"
         }), 200
 
     except Exception as e:
         return jsonify({
             "data": [],
             "status": "error",
-            "message": str(e),
+            "message": str(e)
         }), 500
 def safe_float_conversion(value):
     """Helper function to safely convert a value to a float or return 0.0 if invalid or empty"""
@@ -3433,6 +3447,7 @@ def get_all_expense():
                     if 'name' in item and '-' in item['name']:
                         return int(item['name'].split('-')[0].strip())
         except (ValueError, TypeError):
+            pass
         return None
 
     def get_parent_account(account_code):
@@ -3562,6 +3577,7 @@ def get_all_liabilities():
                     if 'name' in item and '-' in item['name']:
                         return int(item['name'].split('-')[0].strip())
         except (ValueError, TypeError):
+            pass
         return None
 
     def get_parent_account(account_code):
@@ -4486,7 +4502,9 @@ def get_balance_accounts_debited_credited():
                 if account_name in account_groups:
                     account_groups[account_name]["total_amount"] += (debit_amount - credit_amount)
                 else:
+                    pass
             else:
+                pass
 
         # Process transactions and update amounts for accounts with transactions
         for transaction in transactions:
@@ -4551,7 +4569,6 @@ def get_balance_accounts_debited_credited():
         return jsonify({"error": "An unexpected error occurred"}), 500
 
 
-import logging
 from collections import defaultdict
 
 @app.route('/transactions/accounts', methods=['GET'])
@@ -4610,6 +4627,7 @@ def get_accounts():
                 if isinstance(credited_account, dict) and 'name' in credited_account and 'amount' in credited_account:
                     update_account_balances(credited_account['name'], 0, credited_account['amount'], account_balances)
                 else:
+                    pass
 
     # Prepare the final account balances
     final_account_balances = []
@@ -4692,13 +4710,16 @@ def extract_transaction_details(transaction):
             elif isinstance(account, str):  # If it's a string, convert it to a dictionary
                 normalized_credited_accounts.append({"name": account, "amount": amount})
             else:
+                pass
     elif isinstance(credited_accounts, dict):  # Single dictionary case
         if 'name' in credited_accounts and 'amount' in credited_accounts:
             normalized_credited_accounts.append(credited_accounts)
         else:
+            pass
     elif isinstance(credited_accounts, str):  # Single string case
         normalized_credited_accounts.append({"name": credited_accounts, "amount": amount})
     else:
+        pass
 
     return amount, debited_account, normalized_credited_accounts
 def mirror_amounts(amount, debited_account, credited_accounts):
